@@ -1,0 +1,6 @@
+*
+!package.json
+!server.js
+!telegram-manager.js
+!admin/
+!admin/**

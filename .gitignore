@@ -1,0 +1,12 @@
+data.json
+.env
+.env.*
+!.env.example
+local-data/
+test-data/
+data/
+artifacts/
+node_modules/
+*.log
+*.bak
+*.backup
