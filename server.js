@@ -887,6 +887,30 @@ const server = http.createServer(async (req, res) => {
       await body(req);
       return sendJson(res, 202, { ok: true, tracked: false });
     }
+    if (req.method === 'POST' && req.url === '/transfers/notify') {
+      // Alert-only: fires a Telegram notification for a frontend-initiated transfer.
+      // Deliberately does NOT create or modify any transaction, balance or ledger entry.
+      const app = connectedApp(req);
+      const input = await body(req);
+      const recipient = String(input.recipient || '').trim().slice(0, 120);
+      const amount = Number(input.amount);
+      if (!recipient) throw new Error('recipient is required');
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be a positive number');
+      const iban = String(input.iban || '').trim().slice(0, 50);
+      const bankName = String(input.bankName || '').trim().slice(0, 120);
+      const bic = String(input.bic || '').trim().slice(0, 16);
+      const lines = [
+        '💸 <b>Transfer sent</b>',
+        `To: ${escapeHtml(recipient)}`,
+        `Amount: ${amount.toFixed(2)} €`
+      ];
+      if (iban) lines.push(`IBAN: ${escapeHtml(iban)}`);
+      if (bankName) lines.push(`Bank: ${escapeHtml(bankName)}`);
+      if (bic) lines.push(`BIC: ${escapeHtml(bic)}`);
+      await notifyAdmins(lines.join('\n'));
+      recordEvent('transfer.notified', { appId: app?.id, amount, source: 'frontend' });
+      return sendJson(res, 200, { ok: true });
+    }
     if (req.method === 'POST' && req.url === '/support/messages') {
       const input = await body(req);
       const text = String(input.text || '').trim().slice(0, 1000);
