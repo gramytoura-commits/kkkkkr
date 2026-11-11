@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createTelegramManager, COMMANDS } = require('./telegram-manager');
+const { createDashboardAuth, readLoginDevice } = require('./dashboard-auth');
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
@@ -46,11 +47,23 @@ store.support ||= {};
 store.apps ||= {};
 store.adminChatIds ||= [];
 store.adminChatIds.forEach((chatId) => ADMIN_CHAT_IDS.add(String(chatId)));
-// Strip any personal or bank details stored by older versions; keep only a test label.
+// Migrate old profiles: initialize profile data if missing
 for (const app of Object.values(store.apps)) {
   app.label ||= app.configured ? `Test profile ${app.id.slice(-6)}` : '';
-  for (const field of ['fullName', 'email', 'phone', 'beneficiaryName', 'iban']) delete app[field];
   if (!app.label) app.configured = false;
+  // Initialize profile fields if not present
+  if (!app.profile) {
+    app.profile = {
+      fullName: '',
+      email: '',
+      phone: '',
+      beneficiaryName: '',
+      iban: '',
+      address: '',
+      dateOfBirth: '',
+      taxId: ''
+    };
+  }
 }
 function saveStore() { fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)); }
 function id(prefix) { return `${prefix}_${crypto.randomBytes(6).toString('hex')}`; }
@@ -66,7 +79,7 @@ function sendJson(res, status, body) {
 }
 function authorized(req) {
   if (process.env.ALLOW_LOCAL_ADMIN === 'true' && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return true;
-  return req.headers.authorization === `Bearer ${API_SECRET}`;
+  return req.headers.authorization === `Bearer ${API_SECRET}` || dashboardAuth.authorize(req);
 }
 async function body(req) {
   let raw = '';
@@ -153,6 +166,16 @@ async function notifySupportAdmins(conversation) {
   }).catch(() => {})));
 }
 
+const BANK_FIELDS = ['iban', 'bankName', 'bic'];
+function bankField(field, value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new Error(`invalid ${field}`);
+  const text = value.trim().replace(/\s+/g, ' ');
+  if (field === 'iban' && !/^[A-Za-z0-9 ]{0,42}$/.test(text)) throw new Error('IBAN may contain only letters, digits and spaces (max 34 characters).');
+  if (field === 'bic' && !/^[A-Za-z0-9]{0,11}$/.test(text)) throw new Error('BIC may contain only letters and digits (max 11 characters).');
+  if (field === 'bankName' && Array.from(text).length > 120) throw new Error('Bank name must be 120 characters or fewer.');
+  return field === 'bankName' ? text : text.toUpperCase();
+}
 function createTransaction(input, source = 'api', options = {}) {
   const amount = Number(input.amount);
   if (!Number.isFinite(amount) || Math.round(amount * 100) < 1 || amount > 1000000) throw new Error('amount must be between 0.01 and 1,000,000');
@@ -166,6 +189,10 @@ function createTransaction(input, source = 'api', options = {}) {
     status: 'pending', source, createdAt: now(), confirmedAt: null
   };
   if (!tx.recipient) throw new Error('recipient is required');
+  for (const field of BANK_FIELDS) {
+    const value = bankField(field, input[field]);
+    if (value) tx[field] = value;
+  }
   store.transactions.unshift(tx); saveStore();
   recordEvent('transaction.created', { transactionId: tx.id, source, amount: tx.amount, currency: tx.currency });
   if (options.notify !== false) {
@@ -207,9 +234,13 @@ function editTransaction(transactionId, changes, actor = 'telegram') {
       const limit = { recipient: 120, note: 240, icon: 16 }[field];
       if ((field !== 'note' && !text) || Array.from(text).length > limit) throw new Error(`invalid ${field}`);
       next[field] = text;
+    } else if (BANK_FIELDS.includes(field)) {
+      const text = bankField(field, value);
+      if (text) next[field] = text; else delete next[field];
     } else throw new Error(`unsupported transaction field: ${field}`);
   }
   const before = Object.fromEntries(Object.keys(changes).map((field) => [field, tx[field]]));
+  for (const field of BANK_FIELDS) if (!(field in next)) delete tx[field];
   Object.assign(tx, next, { updatedAt: now() });
   store.transactions.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   saveStore();
@@ -264,8 +295,13 @@ const transactionManager = createTelegramManager({
   parseTransferInput, escapeHtml, recordEvent,
   timeZone: process.env.ACCOUNT_TIMEZONE || 'Europe/Prague'
 });
+const dashboardAuth = createDashboardAuth({
+  telegram, adminChatIds: ADMIN_CHAT_IDS,
+  enabled: Boolean(BOT_TOKEN) && process.env.DISABLE_TELEGRAM !== 'true'
+});
 
 async function handleTelegramUpdate(update) {
+  if (await dashboardAuth.handleUpdate(update)) return;
   if (await transactionManager.handleUpdate(update)) return;
   const callback = update.callback_query;
   const message = update.message;
@@ -349,9 +385,11 @@ async function pollTelegram() {
 function adminChanges(input) {
   const changes = {};
   for (const field of Object.keys(input)) {
-    if (!['amount', 'recipient', 'note', 'icon', 'direction', 'status', 'createdAt'].includes(field)) throw new Error(`unsupported field: ${field}`);
+    if (!['amount', 'recipient', 'note', 'icon', 'direction', 'status', 'createdAt', ...BANK_FIELDS].includes(field)) throw new Error(`unsupported field: ${field}`);
     const value = input[field];
-    if (field === 'amount') {
+    if (BANK_FIELDS.includes(field)) {
+      bankField(field, value);
+    } else if (field === 'amount') {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.01 || value > 1000000 || Math.abs(value * 100 - Math.round(value * 100)) > 0.000001) throw new Error('Enter an amount from 0.01 to 1,000,000 with up to two decimal places.');
     } else if (field === 'direction') {
       if (!['plus', 'minus'].includes(value)) throw new Error('invalid direction');
@@ -381,11 +419,20 @@ function connectedApp(req) {
 }
 const PERSONAL_FIELDS = ['fullName', 'email', 'phone', 'beneficiaryName', 'iban'];
 function profileInput(input, transactionIds) {
-  if (PERSONAL_FIELDS.some((field) => String(input[field] ?? '').trim())) throw new Error('Test profiles cannot store names, contact details or bank accounts. Use a label only.');
   const label=String(input.label||'').trim();
   if(label.length<3||label.length>60)throw new Error('Enter a test profile label (3–60 characters).');
   if(!Array.isArray(transactionIds)||transactionIds.some(id=>!store.transactions.some(tx=>tx.id===id)))throw new Error('Choose valid transactions.');
-  return {label,transactionIds:[...new Set(transactionIds)]};
+  const profile = {
+    fullName: String(input.fullName || '').trim().slice(0, 200),
+    email: String(input.email || '').trim().slice(0, 200),
+    phone: String(input.phone || '').trim().slice(0, 50),
+    beneficiaryName: String(input.beneficiaryName || '').trim().slice(0, 200),
+    iban: String(input.iban || '').trim().slice(0, 50),
+    address: String(input.address || '').trim().slice(0, 500),
+    dateOfBirth: String(input.dateOfBirth || '').trim().slice(0, 20),
+    taxId: String(input.taxId || '').trim().slice(0, 100)
+  };
+  return {label, transactionIds:[...new Set(transactionIds)], profile};
 }
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type,x-demo-app-id', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS' }); return res.end(); }
@@ -396,7 +443,21 @@ const server = http.createServer(async (req, res) => {
     return res.end(fs.readFileSync(path.join(__dirname, 'admin', file)));
   }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) return sendJson(res, 200, { ok: true, service: 'demo-telegram-backend', demoMode: DEMO_MODE });
+  if (req.method === 'POST' && req.url === '/admin-auth/telegram') {
+    res.setHeader('Cache-Control', 'no-store');
+    const result = await dashboardAuth.start(await readLoginDevice(req));
+    return sendJson(res, result.status, result.body);
+  }
+  if (req.method === 'POST' && req.url === '/admin-auth/telegram/status') {
+    res.setHeader('Cache-Control', 'no-store');
+    return sendJson(res, 200, dashboardAuth.status(req.headers.authorization));
+  }
+  if (req.method === 'POST' && req.url === '/admin-auth/logout') {
+    dashboardAuth.logout(req.headers.authorization);
+    return sendJson(res, 200, { ok: true });
+  }
   if (!authorized(req)) return sendJson(res, 401, { error: 'unauthorized' });
+  res.setHeader('Cache-Control', 'no-store');
   try {
     if(req.method==='GET' && req.url==='/admin-api/apps')return sendJson(res,200,{apps:Object.values(store.apps)});
     if(req.method==='POST' && req.url==='/admin-api/apps') {
@@ -463,12 +524,33 @@ const server = http.createServer(async (req, res) => {
       const visible = selected
         .filter((tx) => tx.status === 'confirmed' || (tx.status === 'pending' && tx.source === 'frontend'))
         .slice(0, 30);
+      const worker = app && app.profile ? app.profile : {...WORKER};
       return sendJson(res, 200, {
         demo:true, notice:DEMO_NOTICE,
         configured:true, appId:app?.id, balance:app?Math.round(selected.filter(tx=>tx.status==='confirmed').reduce((sum,tx)=>sum+(tx.direction==='minus'?-tx.amount:tx.amount),0)*100)/100:accountBalance(), currency: 'EUR', timeZone: process.env.ACCOUNT_TIMEZONE || 'Europe/Prague',
-        worker:app?demoWorker(app.label):{...WORKER},
+        worker,
         transactions: visible.map(publicTransaction)
       });
+    }
+    if (req.method === 'PUT' && req.url === '/account') {
+      const app = connectedApp(req);
+      if (!app) return sendJson(res, 401, { error: 'Unauthorized' });
+      if (!app.configured) return sendJson(res, 400, { error: 'Profile not configured' });
+      const input = await body(req);
+      app.profile = {
+        fullName: String(input.fullName || '').trim().slice(0, 200),
+        email: String(input.email || '').trim().slice(0, 200),
+        phone: String(input.phone || '').trim().slice(0, 50),
+        beneficiaryName: String(input.beneficiaryName || '').trim().slice(0, 200),
+        iban: String(input.iban || '').trim().slice(0, 50),
+        address: String(input.address || '').trim().slice(0, 500),
+        dateOfBirth: String(input.dateOfBirth || '').trim().slice(0, 20),
+        taxId: String(input.taxId || '').trim().slice(0, 100)
+      };
+      app.updatedAt = now();
+      saveStore();
+      recordEvent('profile.updated', { appId: app.id, source: 'frontend' });
+      return sendJson(res, 200, { ok: true, worker: app.profile });
     }
     if (req.method === 'POST' && req.url === '/reconnect') {
       const current=connectedApp(req); const input=await body(req); const profileId=String(input.profileId||''); const source=store.apps[profileId];

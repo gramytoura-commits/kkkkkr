@@ -2,6 +2,8 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { key: '', base: '', transactions: [], events: [], apps: [], activeAppId: '', globalOrder: JSON.parse(localStorage.getItem('demo-ledger-order') || '[]'), balance: 0, filter: 'all', query: '', page: 0, view: 'transactions', editingId: null, deletingId: null, connected: false, busy: false, dark: localStorage.getItem('demo-ledger-theme') !== 'light' };
 const PAGE_SIZE = 12;
+let telegramAttempt;
+const authorization = () => `${state.telegram ? 'Dashboard' : 'Bearer'} ${state.key}`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (value) => new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' }).format(value);
 const date = (value) => new Date(value).toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
@@ -13,11 +15,17 @@ function notice(message, error = false) {
   noticeTimer = setTimeout(() => $('#notice').className = '', 5500);
 }
 async function request(path, options = {}) {
-  const response = await fetch(`${state.base}${path}`, { ...options, signal: AbortSignal.timeout(15000), headers: { authorization: `Bearer ${state.key}`, 'content-type': 'application/json' } });
+  const response = await fetch(`${state.base}${path}`, { ...options, signal: AbortSignal.timeout(15000), headers: { authorization: authorization(), 'content-type': 'application/json' } });
   let result;
   try { result = await response.json(); } catch { throw new Error('The backend returned an invalid response. Check the address.'); }
   if (!response.ok) {
-    if (response.status === 401) throw new Error('The backend key was not accepted.');
+    if (response.status === 401) {
+      if (state.telegram) {
+        if (state.connected) disconnectDashboard();
+        throw new Error('Your Telegram session expired. Sign in again.');
+      }
+      throw new Error('The backend key was not accepted.');
+    }
     if (response.status === 404 && path.startsWith('/admin-api')) throw new Error('This backend needs the dashboard update before this action is available.');
     throw new Error(result.error || 'The request could not be completed.');
   }
@@ -50,9 +58,11 @@ function render() {
   $('#next').disabled = state.page >= pages - 1;
   $('#auditRows').innerHTML = state.events.length ? state.events.map((event) => `<article class="audit-entry"><time>${escape(date(event.createdAt))}</time><div><b>${escape(event.type)}</b><small>${escape([event.actor || event.source, event.transactionId, event.appId].filter(Boolean).join(' · '))}</small></div></article>`).join('') : '<div class="empty">No activity recorded yet.</div>';
 }
-async function refresh() {
-  if (!state.connected || state.busy) return;
+async function refresh(connecting = false) {
+  if ((!state.connected && !connecting) || state.busy) return;
+  const activeAuthorization = authorization();
   const [account, ledger, audit, apps] = await Promise.all([request('/account'), request('/transactions'), request('/logs'), request('/admin-api/apps')]);
+  if (authorization() !== activeAuthorization || (!state.connected && !connecting)) return;
   state.apps=apps.apps||[];
   if (state.activeAppId && !state.apps.some((app) => app.id === state.activeAppId)) state.activeAppId = '';
   renderAppSelector();
@@ -72,7 +82,7 @@ function edit(tx) {
   form.reset();
   $('#editorTitle').textContent = tx ? 'Edit transaction' : 'New transaction';
   $('#editorError').textContent = '';
-  const values = { recipient: '', amount: '', direction: 'plus', status: 'confirmed', icon: '↗', note: '', ...tx, createdAt: localInput(tx?.createdAt || new Date()) };
+  const values = { recipient: '', amount: '', direction: 'plus', status: 'confirmed', icon: '↗', note: '', iban: '', bankName: '', bic: '', ...tx, createdAt: localInput(tx?.createdAt || new Date()) };
   for (const [key, value] of Object.entries(values)) if (form.elements.namedItem(key)) form.elements.namedItem(key).value = value;
   document.querySelectorAll('#iconPicker [data-icon]').forEach((button) => button.classList.toggle('selected', button.dataset.icon === values.icon));
   $('#editor').showModal();
@@ -101,36 +111,117 @@ async function mutation(form, errorSelector, action, success) {
 $('#backendUrl').value = location.pathname.startsWith('/admin') ? location.origin : 'https://telegram-backend-57085978600.europe-west1.run.app';
 $('#timeZone').textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
 if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) { $('#apiKey').required = false; $('#apiKey').closest('label').hidden = true; }
+
+async function connectDashboard(base, key, telegram = false) {
+  const submit = $('#connectForm button[type="submit"]');
+  state.base = base;
+  state.key = key;
+  state.telegram = telegram;
+  submit.disabled = true;
+  $('#telegramLogin').disabled = true;
+  try { await refresh(true); }
+  finally {
+    submit.disabled = false;
+    $('#telegramLogin').disabled = false;
+  }
+  state.connected = true;
+  $('#apiKey').value = '';
+  $('#login').hidden = true;
+  $('#dashboard').hidden = false;
+  $('#newTransaction').disabled = false;
+  $('#newProfile').disabled = false;
+  $('#sectionNewProfile').disabled = false;
+  $('#disconnect').hidden = false;
+  document.body.classList.add('connected');
+  notice('Backend connected');
+}
+
+async function telegramRequest(path, auth) {
+  const response = await fetch(path, {
+    method: 'POST', signal: AbortSignal.timeout(15000),
+    headers: auth ? { authorization: auth } : {}
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Telegram sign-in is unavailable.');
+  return result;
+}
+
+function resetTelegramAttempt() {
+  telegramAttempt = undefined;
+  $('#telegramLogin').disabled = false;
+  $('#telegramLogin').hidden = false;
+  $('#telegramOpen').hidden = true;
+  $('#telegramOpen').removeAttribute('href');
+  $('#telegramStatus').hidden = true;
+}
+
+$('#telegramLogin').addEventListener('click', async () => {
+  const status = $('#telegramStatus');
+  const attempt = {};
+  telegramAttempt = attempt;
+  $('#telegramLogin').disabled = true;
+  status.hidden = false;
+  status.textContent = 'Opening Telegram sign-in…';
+  try {
+    if (location.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+      throw new Error('Open the dashboard over HTTPS to sign in with Telegram.');
+    }
+    const login = await telegramRequest('/admin-auth/telegram');
+    if (telegramAttempt !== attempt) return;
+    $('#telegramOpen').href = login.telegramUrl;
+    $('#telegramOpen').hidden = false;
+    $('#telegramLogin').hidden = true;
+    status.textContent = `Confirm the request with code ${login.code} in Telegram, then return here.`;
+
+    while (telegramAttempt === attempt) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (telegramAttempt !== attempt) return;
+      const result = await telegramRequest('/admin-auth/telegram/status', `Login ${login.browserToken}`);
+      if (telegramAttempt !== attempt) return;
+      if (result.status === 'approved') {
+        await connectDashboard(location.origin, result.token, true);
+        resetTelegramAttempt();
+        return;
+      }
+      if (result.status === 'denied') throw new Error('Sign-in was declined.');
+      if (result.status === 'expired') throw new Error('Sign-in expired. Start a new request.');
+    }
+  } catch (error) {
+    if (telegramAttempt !== attempt) return;
+    state.key = '';
+    state.telegram = false;
+    resetTelegramAttempt();
+    status.hidden = false;
+    status.textContent = error.message;
+  }
+});
+
 $('#connectForm').addEventListener('submit', async (event) => {
   event.preventDefault();
+  resetTelegramAttempt();
   const submit = event.submitter;
   submit.disabled = true;
   try {
     const url = new URL($('#backendUrl').value);
     if (url.username || url.password || url.search || url.hash || !['http:', 'https:'].includes(url.protocol)) throw new Error('Enter a valid backend address.');
     if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote backend.');
-    state.base = url.href.replace(/\/$/, '');
-    state.key = $('#apiKey').value;
-    state.connected = true;
-    await refresh();
-    $('#apiKey').value = '';
-    $('#login').hidden = true;
-    $('#dashboard').hidden = false;
-    $('#newTransaction').disabled = false;
-    $('#newProfile').disabled = false;
-    $('#sectionNewProfile').disabled = false;
-    $('#disconnect').hidden = false;
-    document.body.classList.add('connected');
-    notice('Backend connected');
-  } catch (error) { state.connected = false; state.key = ''; notice(error.message, true); }
+    await connectDashboard(url.href.replace(/\/$/, ''), $('#apiKey').value);
+  } catch (error) { state.connected = false; state.key = ''; state.telegram = false; notice(error.message, true); }
   finally { submit.disabled = false; }
 });
-$('#disconnect').addEventListener('click', () => {
+function disconnectDashboard() {
+  resetTelegramAttempt();
   state.key = ''; state.connected = false; state.transactions = []; state.events = []; state.balance = 0;
+  state.telegram = false; state.apps = []; state.activeAppId = '';
+  renderAppSelector();
   render();
   document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
   $('#login').hidden = false; $('#dashboard').hidden = true; $('#disconnect').hidden = true; $('#newTransaction').disabled = true; $('#newProfile').disabled = true; $('#sectionNewProfile').disabled = true;
   $('#connectionState').textContent = 'Not connected'; document.body.classList.remove('connected');
+}
+$('#disconnect').addEventListener('click', () => {
+  if (state.telegram) telegramRequest('/admin-auth/logout', authorization()).catch(() => {});
+  disconnectDashboard();
 });
 $('#newTransaction').addEventListener('click', () => edit());
 $('#transactionForm').addEventListener('submit', (event) => {
@@ -229,7 +320,7 @@ $('#transactionRows').addEventListener('drop', async (event) => {
 applyTheme();
 
 const appsSection=document.createElement('section');appsSection.className='card';appsSection.style.cssText='padding:24px;margin-bottom:24px';appsSection.innerHTML='<div class="toolbar"><div><h2 style="margin-top:0">Connected apps</h2><p class="hint">Each profile has its own identity, balance, transaction selection and downloadable Android APK.</p></div><button id="sectionNewProfile" class="primary" type="button">＋ New profile</button></div><div id="appRows"></div>';document.querySelector('.stats').before(appsSection);
-const appDialog=document.createElement('dialog');appDialog.id='appDialog';appDialog.innerHTML='<form id="appForm"><h2 id="appDialogTitle">New profile</h2><label>Test profile label<input name="label" required minlength="3" maxlength="60" placeholder="e.g. Pixel 7 test device"></label><p class="hint">DEMO only: profiles never store names, contact details or bank accounts.</p><label id="copySourceWrap">Copy transactions from profile<select name="copyFromAppId"><option value="">Do not copy transactions</option></select></label><h3>Transactions to show</h3><p class="hint">Only selected transactions appear in this profile and contribute to its balance. Their order is the order shown in the app.</p><div id="appTransactions" style="max-height:260px;overflow:auto"></div><p class="form-error" id="appError"></p><div class="dialog-footer"><button type="button" id="cancelApp">Cancel</button><button class="primary" id="saveAppButton">Save profile and generate APK</button></div></form>';document.body.appendChild(appDialog);
+const appDialog=document.createElement('dialog');appDialog.id='appDialog';appDialog.innerHTML='<form id="appForm"><h2 id="appDialogTitle">New profile</h2><label>Test profile label<input name="label" required minlength="3" maxlength="60" placeholder="e.g. Pixel 7 test device"></label><h3>User details</h3><label>Full name<input name="fullName" maxlength="200" placeholder="e.g. John Doe"></label><label>Email<input name="email" type="email" maxlength="200" placeholder="user@example.com"></label><label>Phone number<input name="phone" type="tel" maxlength="50" placeholder="+49 123 456789"></label><label>IBAN<input name="iban" maxlength="50" placeholder="DE35 1001 0300 0000 2990 22"></label><label>Beneficiary name<input name="beneficiaryName" maxlength="200" placeholder="Full name for transfers"></label><label>Address<input name="address" maxlength="500" placeholder="Street, city, country"></label><label>Date of birth<input name="dateOfBirth" type="date" maxlength="20"></label><label>Tax ID<input name="taxId" maxlength="100" placeholder="Tax ID or VAT number"></label><label id="copySourceWrap">Copy transactions from profile<select name="copyFromAppId"><option value="">Do not copy transactions</option></select></label><h3>Transactions to show</h3><p class="hint">Only selected transactions appear in this profile and contribute to its balance. Their order is the order shown in the app.</p><div id="appTransactions" style="max-height:260px;overflow:auto"></div><p class="form-error" id="appError"></p><div class="dialog-footer"><button type="button" id="cancelApp">Cancel</button><button class="primary" id="saveAppButton">Save profile and generate APK</button></div></form>';document.body.appendChild(appDialog);
 let editingApp='';
 function profileTransactionList(app){
  document.querySelector('#appTransactions').innerHTML=state.transactions.map(tx=>'<label style="display:flex;flex-direction:row;align-items:center;gap:12px"><input style="flex:none" type="checkbox" name="transactionIds" value="'+escape(tx.id)+'" '+(app?.transactionIds?.includes(tx.id)?'checked':'')+'><span>'+escape(tx.recipient)+' · '+escape(money(tx.amount))+' · '+escape(tx.status)+'</span></label>').join('')||'<p>No transactions yet. You can save an empty selection.</p>';
@@ -242,18 +333,18 @@ function openNewProfile(){
  editingApp='';const form=document.querySelector('#appForm');form.reset();document.querySelector('#copySourceWrap').hidden=false;document.querySelector('#appDialogTitle').textContent='New profile';document.querySelector('#saveAppButton').textContent='Save profile and generate APK';renderCopySources();profileTransactionList(null);document.querySelector('#appError').textContent='';appDialog.showModal();
 }
 function openAppEditor(app){
- editingApp=app.id;const form=document.querySelector('#appForm');form.elements.label.value=app.label||'';document.querySelector('#appDialogTitle').textContent='Edit profile';document.querySelector('#saveAppButton').textContent='Save profile';document.querySelector('#copySourceWrap').hidden=true;profileTransactionList(app);document.querySelector('#appError').textContent='';appDialog.showModal();
+ editingApp=app.id;const form=document.querySelector('#appForm');form.elements.label.value=app.label||'';const profile=app.profile||{};form.elements.fullName.value=profile.fullName||'';form.elements.email.value=profile.email||'';form.elements.phone.value=profile.phone||'';form.elements.iban.value=profile.iban||'';form.elements.beneficiaryName.value=profile.beneficiaryName||'';form.elements.address.value=profile.address||'';form.elements.dateOfBirth.value=profile.dateOfBirth||'';form.elements.taxId.value=profile.taxId||'';document.querySelector('#appDialogTitle').textContent='Edit profile';document.querySelector('#saveAppButton').textContent='Save profile';document.querySelector('#copySourceWrap').hidden=true;profileTransactionList(app);document.querySelector('#appError').textContent='';appDialog.showModal();
 }
 function renderApps(){
  const list=document.querySelector('#appRows');if(!list)return;
  list.innerHTML=(state.apps||[]).map(app=>'<div class="app-row"><div><strong>'+escape(app.label||'Setup required')+'</strong><small>DEMO · App '+escape(app.id.slice(0,12))+' · '+app.transactionIds.length+' transactions</small></div><div class="app-row-actions"><button data-configure-app="'+escape(app.id)+'">'+(app.configured?'Edit setup':'Configure app')+'</button><button data-download-app="'+escape(app.id)+'">Download APK</button></div></div>').join('')||'<p class="hint">Create a profile or open the updated Android app to connect it.</p>';
 }
 async function downloadProfileApk(app){
- try { const response=await fetch(`${state.base}/admin-api/apps/${encodeURIComponent(app.id)}/apk`,{headers:{authorization:`Bearer ${state.key}`},signal:AbortSignal.timeout(30000)}); if(!response.ok)throw new Error('APK could not be generated.'); const blob=await response.blob(); const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`demo-ledger-${app.id}.apk`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);notice('APK generated and download started'); } catch(error){ notice(error.message,true); }
+ try { const response=await fetch(`${state.base}/admin-api/apps/${encodeURIComponent(app.id)}/apk`,{headers:{authorization:authorization()},signal:AbortSignal.timeout(30000)}); if(!response.ok)throw new Error('APK could not be generated.'); const blob=await response.blob(); const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`demo-ledger-${app.id}.apk`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);notice('APK generated and download started'); } catch(error){ notice(error.message,true); }
 }
 $('#newProfile').addEventListener('click',openNewProfile);document.querySelector('#sectionNewProfile').addEventListener('click',openNewProfile);
 appsSection.addEventListener('click',event=>{const configure=event.target.closest('[data-configure-app]');if(configure){const app=state.apps.find(a=>a.id===configure.dataset.configureApp);if(app)openAppEditor(app);return;}const download=event.target.closest('[data-download-app]');if(download){const app=state.apps.find(a=>a.id===download.dataset.downloadApp);if(app)downloadProfileApk(app);}});
 document.querySelector('#cancelApp').onclick=()=>{if(!state.busy)appDialog.close();};
 document.querySelector('#appForm select[name="copyFromAppId"]').onchange=event=>{const source=state.apps.find(app=>app.id===event.target.value);if(source)profileTransactionList(source);};
-document.querySelector('#appForm').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const payload={label:data.get('label'),transactionIds:data.getAll('transactionIds')};if(!editingApp)payload.copyFromAppId=data.get('copyFromAppId');const result=await mutation(event.target,'#appError',()=>request(editingApp?'/admin-api/apps/'+encodeURIComponent(editingApp):'/admin-api/apps',{method:editingApp?'PUT':'POST',body:JSON.stringify(payload)}),editingApp?'Profile saved':'Profile created');if(!editingApp&&result?.app){downloadProfileApk(result.app);}}
+document.querySelector('#appForm').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const payload={label:data.get('label'),fullName:data.get('fullName'),email:data.get('email'),phone:data.get('phone'),iban:data.get('iban'),beneficiaryName:data.get('beneficiaryName'),address:data.get('address'),dateOfBirth:data.get('dateOfBirth'),taxId:data.get('taxId'),transactionIds:data.getAll('transactionIds')};if(!editingApp)payload.copyFromAppId=data.get('copyFromAppId');const result=await mutation(event.target,'#appError',()=>request(editingApp?'/admin-api/apps/'+encodeURIComponent(editingApp):'/admin-api/apps',{method:editingApp?'PUT':'POST',body:JSON.stringify(payload)}),editingApp?'Profile saved':'Profile created');if(!editingApp&&result?.app){downloadProfileApk(result.app);}}
 $('#newProfile').disabled=true;document.querySelector('#sectionNewProfile').disabled=true;
