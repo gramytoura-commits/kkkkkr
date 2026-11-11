@@ -11,7 +11,8 @@ const COMMANDS = [
   ['remove', 'Delete a transaction'], ['transfer', 'Create a confirmed demo transfer'],
   ['search', 'Find transactions by name or note'], ['cancel', 'Cancel the current action'],
   ['logs', 'View audit log'], ['apk', 'Download Android demo APK'],
-  ['addadmin', 'Add an administrator'], ['admins', 'List administrators'], ['whoami', 'Show your Chat ID']
+  ['deploy', 'Notify admins of deployment'], ['addadmin', 'Add an administrator'],
+  ['admins', 'List administrators'], ['whoami', 'Show your Chat ID']
 ].map(([command, description]) => ({ command, description }));
 
 function createTelegramManager(deps) {
@@ -385,6 +386,15 @@ function createTelegramManager(deps) {
         else await askDelete(chatId, key, args[0], actor);
       } else if (['/confirm', '/reject'].includes(command)) {
         await handleCallback(chatId, key, actor, `tm:status:${args[0]}:${command === '/confirm' ? 'confirmed' : 'rejected'}`);
+      } else if (command === '/deploy') {
+        const name = args[0] || 'Backend';
+        const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
+        const msg = `🚀 *${name}* deployed\n\n⏰ ${time}`;
+        for (const id of adminChatIds) {
+          await telegram('sendMessage', { chat_id: id, text: msg, parse_mode: 'Markdown' }).catch(() => {});
+        }
+        await send(chatId, '✅ Deployment notification sent to all admins', [menuButton()]);
+        recordEvent('deployment.notified', { actor, deploymentName: name });
       } else if (!text.startsWith('/')) {
         const active = sessions.get(key);
         if (!active) await home(chatId);
