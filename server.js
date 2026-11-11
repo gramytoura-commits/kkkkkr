@@ -176,11 +176,13 @@ async function notifyTelegram(text) {
 
 async function getRecentCommits(count = 5) {
   try {
-    const output = execSync(`git log -${count} --format=%H|%s|%aI`, { cwd: __dirname, encoding: 'utf8' });
-    return output.trim().split('\n').map(line => {
+    const output = execSync(`git log -${count} --format=%H|%s|%aI 2>/dev/null || echo ""`, { cwd: __dirname, encoding: 'utf8', shell: '/bin/bash' });
+    if (!output.trim()) return [];
+    return output.trim().split('\n').filter(Boolean).map(line => {
       const [hash, message, timestamp] = line.split('|');
+      if (!hash || !message) return null;
       return { hash, message, timestamp };
-    });
+    }).filter(Boolean);
   } catch { return []; }
 }
 
@@ -188,14 +190,16 @@ async function checkAndNotifyDeployment() {
   if (!BOT_TOKEN || ADMIN_CHAT_IDS.size === 0) return;
   try {
     const commits = await getRecentCommits(5);
-    if (!commits.length) return;
+    if (!commits || !commits.length) return;
     const latestHash = commits[0]?.hash;
     if (latestHash && latestHash !== store.lastDeploymentCommit) {
       const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
       let msg = `🚀 *Backend* deployed\n\n⏰ ${time}\n\n*Latest commits:*`;
-      commits.forEach((c, i) => {
+      commits.slice(0, 5).forEach((c, i) => {
+        if (!c || !c.timestamp) return;
         const commitTime = new Date(c.timestamp).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
-        msg += `\n${i + 1}. ${c.message.split('\n')[0]}\n   _${commitTime}_`;
+        const commitMsg = (c.message || '').split('\n')[0] || 'No message';
+        msg += `\n${i + 1}. ${commitMsg}\n   _${commitTime}_`;
       });
       await notifyTelegram(msg);
       store.lastDeploymentCommit = latestHash;
