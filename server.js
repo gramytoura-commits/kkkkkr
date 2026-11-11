@@ -502,9 +502,6 @@ const server = http.createServer(async (req, res) => {
     const result = await dashboardAuth.start(device, userId);
     return sendJson(res, result.status, result.body);
   }
-  if (req.url.includes('admin-auth/telegram')) {
-    console.log('DEBUG: Telegram request not matched. Method:', req.method, 'URL:', req.url, 'URL path:', req.url.split('?')[0]);
-  }
   if (req.method === 'POST' && req.url === '/admin-auth/telegram/status') {
     res.setHeader('Cache-Control', 'no-store');
     return sendJson(res, 200, dashboardAuth.status(req.headers.authorization));

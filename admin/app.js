@@ -108,24 +108,21 @@ async function mutation(form, errorSelector, action, success) {
   }
   return result;
 }
-$('#backendUrl').value = location.pathname.startsWith('/admin') ? location.origin : 'https://telegram-backend-57085978600.europe-west1.run.app';
 $('#timeZone').textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
-if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) { $('#apiKey').required = false; $('#apiKey').closest('label').hidden = true; }
 
 async function connectDashboard(base, key, telegram = false) {
   const submit = $('#connectForm button[type="submit"]');
   state.base = base;
   state.key = key;
   state.telegram = telegram;
-  submit.disabled = true;
+  if (submit) submit.disabled = true;
   $('#telegramLogin').disabled = true;
   try { await refresh(true); }
   finally {
-    submit.disabled = false;
+    if (submit) submit.disabled = false;
     $('#telegramLogin').disabled = false;
   }
   state.connected = true;
-  $('#apiKey').value = '';
   $('#login').hidden = true;
   $('#dashboard').hidden = false;
   $('#newTransaction').disabled = false;
@@ -201,19 +198,6 @@ $('#telegramLogin').addEventListener('click', async () => {
   }
 });
 
-$('#connectForm').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  resetTelegramAttempt();
-  const submit = event.submitter;
-  submit.disabled = true;
-  try {
-    const url = new URL($('#backendUrl').value);
-    if (url.username || url.password || url.search || url.hash || !['http:', 'https:'].includes(url.protocol)) throw new Error('Enter a valid backend address.');
-    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote backend.');
-    await connectDashboard(url.href.replace(/\/$/, ''), $('#apiKey').value);
-  } catch (error) { state.connected = false; state.key = ''; state.telegram = false; notice(error.message, true); }
-  finally { submit.disabled = false; }
-});
 function disconnectDashboard() {
   resetTelegramAttempt();
   state.key = ''; state.connected = false; state.transactions = []; state.events = []; state.balance = 0;
