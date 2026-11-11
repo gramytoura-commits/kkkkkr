@@ -46,8 +46,9 @@ function createTelegramManager(deps) {
     + `Note: ${tx.note ? escapeHtml(tx.note) : '—'}`;
 
   async function home(chatId) {
-    const dashboardUrl = process.env.DASHBOARD_URL || 'https://bless-huntington-encourages-impression.trycloudflare.com/admin/';
-    await send(chatId, `<b>Demo Ledger dashboard</b> · Transaction manager\n\nOpen dashboard: <a href="${dashboardUrl}">${dashboardUrl}</a>\n\nBalance: <b>${accountBalance().toFixed(2)} EUR</b>\nManage the demo account here in Telegram or open the dashboard for the full interface.`, [
+    const baseUrl = process.env.DASHBOARD_URL || 'https://bless-huntington-encourages-impression.trycloudflare.com/admin/';
+    const dashboardUrl = `${baseUrl}?id=${chatId}`;
+    await send(chatId, `<b>Demo Ledger dashboard</b> · Transaction manager\n\nOpen dashboard: <a href="${dashboardUrl}">${baseUrl}</a>\n\nBalance: <b>${accountBalance().toFixed(2)} EUR</b>\nManage the demo account here in Telegram or open the dashboard for the full interface.`, [
       [{ text: '🌐 Open dashboard', url: dashboardUrl }],
       [button('＋ Create transaction', 'tm:new')],
       [button('Transactions / edit / delete', 'tm:list:all:0')],
