@@ -7,6 +7,10 @@
   <div>
     <h2>Sign in to Demo Ledger</h2>
     <p>Approve the sign-in in your private chat with the Telegram bot.</p>
+    <label>Your Telegram ID
+      <input id="telegramIdInput" type="text" placeholder="e.g. 123456789" autocomplete="off">
+      <small>Find it by sending /start to the bot</small>
+    </label>
     <button class="primary" id="telegramLogin" type="button">Sign in with Telegram</button>
     <a class="primary telegram-open" id="telegramOpen" target="_blank" rel="noopener noreferrer" hidden>Open Telegram</a>
     <p id="telegramStatus" role="status" hidden></p>

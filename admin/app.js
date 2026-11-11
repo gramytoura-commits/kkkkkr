@@ -166,9 +166,11 @@ $('#telegramLogin').addEventListener('click', async () => {
     if (location.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
       throw new Error('Open the dashboard over HTTPS to sign in with Telegram.');
     }
-    const params = new URLSearchParams(location.search);
-    const userId = params.get('id');
-    const endpoint = userId ? `/admin-auth/telegram?userId=${encodeURIComponent(userId)}` : '/admin-auth/telegram';
+    const userId = $('#telegramIdInput').value.trim();
+    if (!userId) {
+      throw new Error('Please enter your Telegram ID.');
+    }
+    const endpoint = `/admin-auth/telegram?userId=${encodeURIComponent(userId)}`;
     const login = await telegramRequest(endpoint);
     if (telegramAttempt !== attempt) return;
     $('#telegramOpen').href = login.telegramUrl;
