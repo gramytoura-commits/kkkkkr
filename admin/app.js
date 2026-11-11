@@ -173,7 +173,8 @@ $('#telegramLogin').addEventListener('click', async () => {
     $('#telegramOpen').href = login.telegramUrl;
     $('#telegramOpen').hidden = false;
     $('#telegramLogin').hidden = true;
-    status.textContent = `Confirm the request with code ${login.code} in Telegram, then return here.`;
+    window.open(login.telegramUrl, '_blank', 'noopener');
+    status.textContent = `Code ${login.code}. If Telegram didn't open, tap "Open Telegram" below, then confirm there and return here.`;
 
     while (telegramAttempt === attempt) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
