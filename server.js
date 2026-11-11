@@ -4,7 +4,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { createTelegramManager, COMMANDS } = require('./telegram-manager');
-const { createDashboardAuth, readLoginDevice } = require('./dashboard-auth');
+let createDashboardAuth, readLoginDevice;
+try {
+  ({ createDashboardAuth, readLoginDevice } = require('./dashboard-auth'));
+} catch (e) {
+  createDashboardAuth = () => ({ authorize: () => false, handleUpdate: async () => false, start: async () => ({ status: 401 }) });
+  readLoginDevice = () => ({});
+}
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
