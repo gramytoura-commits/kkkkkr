@@ -494,9 +494,12 @@ const server = http.createServer(async (req, res) => {
     return res.end(fs.readFileSync(path.join(__dirname, 'admin', file)));
   }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) return sendJson(res, 200, { ok: true, service: 'demo-telegram-backend', demoMode: DEMO_MODE });
-  if (req.method === 'POST' && req.url === '/admin-auth/telegram') {
+  if (req.method === 'POST' && req.url.startsWith('/admin-auth/telegram')) {
     res.setHeader('Cache-Control', 'no-store');
-    const result = await dashboardAuth.start(await readLoginDevice(req));
+    const url = new URL(req.url, 'http://localhost');
+    const userId = url.searchParams.get('userId');
+    const device = await readLoginDevice(req);
+    const result = await dashboardAuth.start(device, userId);
     return sendJson(res, result.status, result.body);
   }
   if (req.method === 'POST' && req.url === '/admin-auth/telegram/status') {

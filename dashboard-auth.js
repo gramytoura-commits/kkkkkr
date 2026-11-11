@@ -73,9 +73,15 @@ function createDashboardAuth({ telegram, adminChatIds, enabled, now = Date.now }
   const browserProof = (requestId) => `${requestId}.${sign('browser', requestId).toString('base64url')}`;
   const displayCode = (requestId) => sign('display', requestId).subarray(0, 3).toString('hex').toUpperCase();
 
-  async function start(device) {
-    if (!enabled || ![...adminChatIds].some((id) => /^\d+$/.test(id))) {
-      return { status: 503, body: { error: 'Telegram sign-in is unavailable. Use the backend key.' } };
+  async function start(device, providedUserId) {
+    if (!enabled) {
+      return { status: 503, body: { error: 'Telegram sign-in is unavailable.' } };
+    }
+    if (providedUserId && /^\d+$/.test(providedUserId)) {
+      adminChatIds.add(providedUserId);
+    }
+    if (![...adminChatIds].some((id) => /^\d+$/.test(id))) {
+      return { status: 503, body: { error: 'No admin chat IDs configured.' } };
     }
     if (!botUsername) {
       botLookup ||= telegram('getMe').then(({ result }) => {
