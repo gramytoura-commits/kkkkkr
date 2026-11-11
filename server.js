@@ -166,6 +166,12 @@ async function notifySupportAdmins(conversation) {
   }).catch(() => {})));
 }
 
+async function notifyTelegram(text) {
+  await Promise.all([...ADMIN_CHAT_IDS].map((chatId) => BOT_TOKEN && telegram('sendMessage', {
+    chat_id: chatId, text, parse_mode: 'Markdown'
+  }).catch(() => {})));
+}
+
 const BANK_FIELDS = ['iban', 'bankName', 'bic'];
 function bankField(field, value) {
   if (value === undefined || value === null) return '';
@@ -513,6 +519,28 @@ const server = http.createServer(async (req, res) => {
         deltaCents -= adjustment;
       }
       return sendJson(res, 200, { balance: accountBalance(), currency: 'EUR' });
+    }
+    if (req.method === 'POST' && req.url === '/admin-api/deploy-notification') {
+      if (!authorized(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const input = await body(req);
+      const commits = Array.isArray(input.commits) ? input.commits : [];
+      const deploymentName = String(input.deploymentName || 'Backend').slice(0, 100);
+      const deploymentTime = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
+      if (!commits.length) {
+        notifyTelegram(`🚀 *${deploymentName}* deployed\n\n⏰ ${deploymentTime}\n\nNo commit information available.`);
+      } else {
+        let message = `🚀 *${deploymentName}* deployed\n\n⏰ ${deploymentTime}\n\n*Latest commits:*\n`;
+        commits.slice(0, 10).forEach((commit, idx) => {
+          const time = new Date(commit.timestamp).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
+          message += `\n${idx + 1}. ${commit.message.split('\n')[0]}\n   _${time}_`;
+        });
+        notifyTelegram(message);
+        if (commits.length > 10) {
+          notifyTelegram(`_… and ${commits.length - 10} more commits_`);
+        }
+      }
+      recordEvent('deployment.notified', { actor: 'admin-api', deploymentName, commitCount: commits.length });
+      return sendJson(res, 200, { ok: true, messagesQueued: ADMIN_CHAT_IDS.size });
     }
     if (req.method === 'GET' && req.url === '/transactions') return sendJson(res, 200, { transactions: store.transactions.map(publicTransaction) });
     if (req.method === 'GET' && req.url === '/history') return sendJson(res, 200, { transactions: transactionHistory().map(publicTransaction) });
