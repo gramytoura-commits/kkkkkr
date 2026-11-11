@@ -46,6 +46,7 @@ store.events ||= [];
 store.support ||= {};
 store.apps ||= {};
 store.adminChatIds ||= [];
+store.lastDeploymentCommit = store.lastDeploymentCommit || '';
 store.adminChatIds.forEach((chatId) => ADMIN_CHAT_IDS.add(String(chatId)));
 // Migrate old profiles: initialize profile data if missing
 for (const app of Object.values(store.apps)) {
@@ -170,6 +171,40 @@ async function notifyTelegram(text) {
   await Promise.all([...ADMIN_CHAT_IDS].map((chatId) => BOT_TOKEN && telegram('sendMessage', {
     chat_id: chatId, text, parse_mode: 'Markdown'
   }).catch(() => {})));
+}
+
+async function getRecentCommits(count = 5) {
+  try {
+    const { execSync } = require('child_process');
+    const output = execSync(`git log -${count} --format=%H|%s|%aI`, { cwd: __dirname, encoding: 'utf8' });
+    return output.trim().split('\n').map(line => {
+      const [hash, message, timestamp] = line.split('|');
+      return { hash, message, timestamp };
+    });
+  } catch { return []; }
+}
+
+async function checkAndNotifyDeployment() {
+  if (!BOT_TOKEN || ADMIN_CHAT_IDS.size === 0) return;
+  try {
+    const commits = await getRecentCommits(5);
+    if (!commits.length) return;
+    const latestHash = commits[0]?.hash;
+    if (latestHash && latestHash !== store.lastDeploymentCommit) {
+      const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
+      let msg = `🚀 *Backend* deployed\n\n⏰ ${time}\n\n*Latest commits:*`;
+      commits.forEach((c, i) => {
+        const commitTime = new Date(c.timestamp).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
+        msg += `\n${i + 1}. ${c.message.split('\n')[0]}\n   _${commitTime}_`;
+      });
+      await notifyTelegram(msg);
+      store.lastDeploymentCommit = latestHash;
+      saveStore();
+      recordEvent('deployment.auto-notified', { commits: commits.length });
+    }
+  } catch (error) {
+    console.error('Deployment check error:', error.message);
+  }
 }
 
 const BANK_FIELDS = ['iban', 'bankName', 'bic'];
@@ -643,7 +678,11 @@ seedFrontendExamples();
 server.listen(PORT, () => {
   console.log(`Demo backend listening on http://127.0.0.1:${PORT}`);
   if (DEMO_MODE) console.log('DEMO_MODE is enabled: no real money movement is performed.');
-  if (process.env.DISABLE_TELEGRAM !== 'true') pollTelegram();
+  if (process.env.DISABLE_TELEGRAM !== 'true') {
+    pollTelegram();
+    checkAndNotifyDeployment();
+    setInterval(checkAndNotifyDeployment, 5 * 60 * 1000);
+  }
 });
 
 }
