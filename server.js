@@ -52,6 +52,7 @@ store.transactions ||= [];
 store.events ||= [];
 store.support ||= {};
 store.apps ||= {};
+store.groups ||= {};
 store.adminChatIds ||= [];
 store.lastDeploymentCommit = store.lastDeploymentCommit || '';
 store.adminChatIds.forEach((chatId) => ADMIN_CHAT_IDS.add(String(chatId)));
@@ -76,6 +77,53 @@ for (const app of Object.values(store.apps)) {
 function saveStore() { fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)); }
 function id(prefix) { return `${prefix}_${crypto.randomBytes(6).toString('hex')}`; }
 function now() { return new Date().toISOString(); }
+// Linked groups: a group owns the shared transaction selection, balance override and
+// currency. Every app belongs to one group; apps in the same group share that data.
+function newGroupId() { return `grp_${crypto.randomBytes(8).toString('hex')}`; }
+function createGroup({ name = '', currency = 'EUR', balanceOverride = null, transactionIds = [] } = {}) {
+  const groupId = newGroupId();
+  store.groups[groupId] = {
+    id: groupId,
+    name: String(name || '').trim().slice(0, 80),
+    currency: String(currency || 'EUR').trim().slice(0, 8) || 'EUR',
+    balanceOverride: balanceOverride === null || balanceOverride === '' || balanceOverride === undefined ? null : Number(balanceOverride),
+    transactionIds: [...new Set((transactionIds || []).filter((t) => store.transactions.some((tx) => tx.id === t)))],
+    createdAt: now(), updatedAt: now()
+  };
+  return store.groups[groupId];
+}
+// Migrate apps to groups: each existing app that has no group gets its own solo group
+// seeded from its current transactionIds, so prior per-app behavior is preserved.
+let groupsMigrated = false;
+for (const app of Object.values(store.apps)) {
+  if (!app.groupId || !store.groups[app.groupId]) {
+    const group = createGroup({ name: app.label || 'Account', transactionIds: app.transactionIds || [] });
+    app.groupId = group.id;
+    groupsMigrated = true;
+  }
+  if (!app.status) { app.status = 'active'; groupsMigrated = true; }
+  if (app.bankName === undefined) app.bankName = '';
+  if (app.bic === undefined) app.bic = '';
+  if (app.accountHolder === undefined) app.accountHolder = '';
+}
+if (groupsMigrated) saveStore();
+function groupOf(app) { return app && store.groups[app.groupId] ? store.groups[app.groupId] : null; }
+function appTransactionIds(app) { const g = groupOf(app); return g ? g.transactionIds : (app?.transactionIds || []); }
+function computedGroupBalance(group) {
+  const ids = new Set(group.transactionIds);
+  return Math.round(store.transactions
+    .filter((tx) => ids.has(tx.id) && tx.status === 'confirmed')
+    .reduce((sum, tx) => sum + (tx.direction === 'minus' ? -tx.amount : tx.amount), 0) * 100) / 100;
+}
+function groupBalance(group) { return group.balanceOverride !== null && group.balanceOverride !== undefined ? group.balanceOverride : computedGroupBalance(group); }
+function appsInGroup(groupId) { return Object.values(store.apps).filter((a) => a.groupId === groupId); }
+function groupView(group) {
+  return { ...group, balance: groupBalance(group), computedBalance: computedGroupBalance(group), appCount: appsInGroup(group.id).length };
+}
+function appView(app) {
+  const g = groupOf(app);
+  return { ...app, transactionIds: appTransactionIds(app), balance: g ? groupBalance(g) : 0, currency: g ? g.currency : 'EUR', groupName: g ? g.name : '' };
+}
 function recordEvent(type, payload = {}) {
   store.events.unshift({ id: id('evt'), type, createdAt: now(), ...payload });
   store.events = store.events.slice(0, 1000);
@@ -463,16 +511,16 @@ function connectedApp(req) {
      const profile={...generated,id:key,claimed:true,claimedFrom:generated.id,generatedApk:false,connectedAt:now(),updatedAt:now()};
      delete store.apps[generated.id]; store.apps[key]=profile; recordEvent('app.claimed',{appId:key,profileId:generated.id,source:'android'});
    } else {
-     store.apps[key]={id:key,label:'',transactionIds:[],configured:false,connectedAt:now()};saveStore();
+     const group=createGroup({name:'Account'});
+     store.apps[key]={id:key,label:'',groupId:group.id,status:'active',bankName:'',bic:'',accountHolder:'',configured:false,connectedAt:now()};saveStore();
    }
  }
  return store.apps[key];
 }
 const PERSONAL_FIELDS = ['fullName', 'email', 'phone', 'beneficiaryName', 'iban'];
-function profileInput(input, transactionIds) {
+function profileInput(input) {
   const label=String(input.label||'').trim();
   if(label.length<3||label.length>60)throw new Error('Enter a test profile label (3–60 characters).');
-  if(!Array.isArray(transactionIds)||transactionIds.some(id=>!store.transactions.some(tx=>tx.id===id)))throw new Error('Choose valid transactions.');
   const profile = {
     fullName: String(input.fullName || '').trim().slice(0, 200),
     email: String(input.email || '').trim().slice(0, 200),
@@ -483,7 +531,32 @@ function profileInput(input, transactionIds) {
     dateOfBirth: String(input.dateOfBirth || '').trim().slice(0, 20),
     taxId: String(input.taxId || '').trim().slice(0, 100)
   };
-  return {label, transactionIds:[...new Set(transactionIds)], profile};
+  const bankName = String(input.bankName || '').trim().slice(0, 120);
+  const bic = String(input.bic || '').trim().slice(0, 16);
+  const accountHolder = String(input.accountHolder || '').trim().slice(0, 200);
+  const status = ['active', 'paused'].includes(String(input.status)) ? String(input.status) : 'active';
+  return { label, profile, bankName, bic, accountHolder, status };
+}
+// Resolve which group an app create/edit should use: an explicit groupId, or a new
+// solo group seeded from transactionIds (keeps the old transactionIds API working).
+function resolveGroupForInput(input, existingApp) {
+  const groupId = String(input.groupId || '');
+  if (groupId) {
+    if (!store.groups[groupId]) throw new Error('Group not found.');
+    return store.groups[groupId];
+  }
+  if (existingApp && groupOf(existingApp)) {
+    if (Array.isArray(input.transactionIds)) {
+      const g = groupOf(existingApp);
+      g.transactionIds = [...new Set(input.transactionIds.filter((t) => store.transactions.some((tx) => tx.id === t)))];
+      g.updatedAt = now();
+    }
+    return groupOf(existingApp);
+  }
+  const sourceId = String(input.copyFromAppId || '');
+  const source = sourceId ? store.apps[sourceId] : null;
+  const seed = Array.isArray(input.transactionIds) ? input.transactionIds : (source ? appTransactionIds(source) : []);
+  return createGroup({ name: String(input.label || 'Account'), transactionIds: seed });
 }
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type,x-demo-app-id', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS' }); return res.end(); }
@@ -513,18 +586,43 @@ const server = http.createServer(async (req, res) => {
   if (!authorized(req)) return sendJson(res, 401, { error: 'unauthorized' });
   res.setHeader('Cache-Control', 'no-store');
   try {
-    if(req.method==='GET' && req.url==='/admin-api/apps')return sendJson(res,200,{apps:Object.values(store.apps)});
+    if(req.method==='GET' && req.url==='/admin-api/apps')return sendJson(res,200,{apps:Object.values(store.apps).map(appView)});
+    if(req.method==='GET' && req.url==='/admin-api/groups')return sendJson(res,200,{groups:Object.values(store.groups).map(groupView)});
+    if(req.method==='POST' && req.url==='/admin-api/groups') {
+      const input=await body(req);
+      if(String(input.name||'').trim().length<2)throw new Error('Enter a group name (2+ characters).');
+      const group=createGroup(input);
+      recordEvent('group.created',{groupId:group.id,actor:'web-admin'});
+      return sendJson(res,201,{group:groupView(group)});
+    }
+    if(req.method==='PUT' && req.url.startsWith('/admin-api/groups/')) {
+      const group=store.groups[req.url.split('/')[3]];if(!group)throw new Error('Group not found');
+      const input=await body(req);
+      if(input.name!==undefined)group.name=String(input.name||'').trim().slice(0,80);
+      if(input.currency!==undefined)group.currency=String(input.currency||'EUR').trim().slice(0,8)||'EUR';
+      if(input.balanceOverride!==undefined)group.balanceOverride=(input.balanceOverride===null||input.balanceOverride==='')?null:Number(input.balanceOverride);
+      if(Array.isArray(input.transactionIds))group.transactionIds=[...new Set(input.transactionIds.filter(t=>store.transactions.some(tx=>tx.id===t)))];
+      group.updatedAt=now();
+      recordEvent('group.updated',{groupId:group.id,actor:'web-admin'});
+      return sendJson(res,200,{group:groupView(group)});
+    }
+    if(req.method==='DELETE' && req.url.startsWith('/admin-api/groups/')) {
+      const groupId=req.url.split('/')[3];const group=store.groups[groupId];if(!group)throw new Error('Group not found');
+      const attached=appsInGroup(groupId);
+      if(attached.length)throw new Error(`Cannot delete: ${attached.length} app(s) still use this group.`);
+      delete store.groups[groupId];recordEvent('group.deleted',{groupId,actor:'web-admin'});
+      return sendJson(res,200,{ok:true});
+    }
     if(req.method==='POST' && req.url==='/admin-api/apps') {
       const input=await body(req);
       const sourceId=String(input.copyFromAppId||'');
-      const source=sourceId?store.apps[sourceId]:null;
-      if(sourceId&&!source)throw new Error('Source profile not found.');
-      const transactionIds=Array.isArray(input.transactionIds)?input.transactionIds:(source?.transactionIds||[]);
-      const fields=profileInput(input,transactionIds);
+      if(sourceId&&!store.apps[sourceId])throw new Error('Source profile not found.');
+      const fields=profileInput(input);
+      const group=resolveGroupForInput(input,null);
       const appId=`app_profile_${crypto.randomBytes(10).toString('hex')}`;
-      const app={id:appId,...fields,configured:true,generatedApk:true,claimed:false,connectedAt:now(),updatedAt:now()};
-      store.apps[appId]=app;recordEvent('app.created',{appId,actor:'web-admin',copiedFrom:sourceId||undefined});
-      return sendJson(res,201,{app,apkUrl:`/admin-api/apps/${encodeURIComponent(appId)}/apk`});
+      const app={id:appId,...fields,groupId:group.id,configured:true,generatedApk:true,claimed:false,connectedAt:now(),updatedAt:now()};
+      store.apps[appId]=app;recordEvent('app.created',{appId,actor:'web-admin',groupId:group.id,copiedFrom:sourceId||undefined});
+      return sendJson(res,201,{app:appView(app),apkUrl:`/admin-api/apps/${encodeURIComponent(appId)}/apk`});
     }
     if(req.method==='GET' && req.url.startsWith('/admin-api/apps/') && req.url.endsWith('/apk')) {
       const appId=req.url.split('/')[3];
@@ -535,8 +633,9 @@ const server = http.createServer(async (req, res) => {
     }
     if(req.method==='PUT' && req.url.startsWith('/admin-api/apps/')) {
       const app=store.apps[req.url.split('/')[3]];if(!app)throw new Error('App not found');
-      const input=await body(req);const fields=profileInput(input,input.transactionIds);
-      Object.assign(app,fields,{configured:true,updatedAt:now()});recordEvent('app.configured',{appId:app.id,actor:'web-admin'});return sendJson(res,200,{app});
+      const input=await body(req);const fields=profileInput(input);
+      const group=resolveGroupForInput(input,app);
+      Object.assign(app,fields,{groupId:group.id,configured:true,updatedAt:now()});recordEvent('app.configured',{appId:app.id,actor:'web-admin',groupId:group.id});return sendJson(res,200,{app:appView(app)});
     }
     if (req.method === 'POST' && req.url === '/admin-api/transactions') {
       const rawInput = await body(req); const appId = String(rawInput.appId || '');
@@ -545,7 +644,7 @@ const server = http.createServer(async (req, res) => {
       const app = appId ? store.apps[appId] : null;
       if (appId && !app) throw new Error('App not found');
       const tx = createTransaction(input, 'web-admin', { notify: false });
-      if (app) { app.transactionIds.push(tx.id); saveStore(); }
+      if (app) { const g = groupOf(app); if (g) { g.transactionIds.push(tx.id); g.updatedAt = now(); saveStore(); } }
       const extra = {};
       if (input.status) extra.status = input.status;
       if (input.createdAt) extra.createdAt = input.createdAt;
@@ -595,15 +694,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/account') {
       const app=connectedApp(req);
       if(app&&!app.configured)return sendJson(res,200,{demo:true,notice:DEMO_NOTICE,configured:false,appId:app.id,worker:{...WORKER},balance:0,transactions:[]});
-      const selected=app?store.transactions.filter(tx=>app.transactionIds.includes(tx.id)):store.transactions;
+      const txIds=app?new Set(appTransactionIds(app)):null;
+      const selected=app?store.transactions.filter(tx=>txIds.has(tx.id)):store.transactions;
       // Statuses are reported as stored: a pending transaction is never shown as sent.
       const visible = selected
         .filter((tx) => tx.status === 'confirmed' || (tx.status === 'pending' && tx.source === 'frontend'))
         .slice(0, 30);
       const worker = app && app.profile ? app.profile : {...WORKER};
+      const group = app ? groupOf(app) : null;
       return sendJson(res, 200, {
         demo:true, notice:DEMO_NOTICE,
-        configured:true, appId:app?.id, balance:app?Math.round(selected.filter(tx=>tx.status==='confirmed').reduce((sum,tx)=>sum+(tx.direction==='minus'?-tx.amount:tx.amount),0)*100)/100:accountBalance(), currency: 'EUR', timeZone: process.env.ACCOUNT_TIMEZONE || 'Europe/Prague',
+        configured:true, appId:app?.id, balance:group?groupBalance(group):(app?0:accountBalance()), currency: group?group.currency:'EUR', timeZone: process.env.ACCOUNT_TIMEZONE || 'Europe/Prague',
         worker,
         transactions: visible.map(publicTransaction)
       });
@@ -632,8 +733,8 @@ const server = http.createServer(async (req, res) => {
       const current=connectedApp(req); const input=await body(req); const profileId=String(input.profileId||''); const source=store.apps[profileId];
       if(!current) throw new Error('Invalid app ID.');
       if(!source||!source.configured) throw new Error('Profile not found or not configured.');
-      Object.assign(current,{label:source.label,transactionIds:[...source.transactionIds],configured:true,linkedProfileId:source.id,updatedAt:now()});
-      saveStore(); recordEvent('app.reconnected',{appId:current.id,profileId:source.id,source:'android'});
+      Object.assign(current,{label:source.label,groupId:source.groupId,profile:source.profile,bankName:source.bankName,bic:source.bic,accountHolder:source.accountHolder,configured:true,linkedProfileId:source.id,updatedAt:now()});
+      saveStore(); recordEvent('app.reconnected',{appId:current.id,profileId:source.id,groupId:source.groupId,source:'android'});
       return sendJson(res,200,{ok:true,appId:current.id,profileId:source.id});
     }
     if (req.method === 'GET' && req.url === '/balance') return sendJson(res, 200, { balance: accountBalance(), currency: 'EUR' });
@@ -669,7 +770,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/transactions') {
       const app=connectedApp(req);if(app&&!app.configured)return sendJson(res,409,{error:'Configure this app in the dashboard first.'});
       const input = await body(req); const tx = createTransaction(input, 'frontend');
-      if(app){app.transactionIds.push(tx.id);saveStore();}
+      if(app){const g=groupOf(app);if(g){g.transactionIds.push(tx.id);g.updatedAt=now();saveStore();}}
       return sendJson(res, 201, { transaction: publicTransaction(tx), demoMode: DEMO_MODE });
     }
     if (req.method === 'POST' && req.url.startsWith('/transactions/')) {
