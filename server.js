@@ -494,7 +494,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(fs.readFileSync(path.join(__dirname, 'admin', file)));
   }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) return sendJson(res, 200, { ok: true, service: 'demo-telegram-backend', demoMode: DEMO_MODE });
-  if (req.method === 'POST' && req.url.startsWith('/admin-auth/telegram')) {
+  if ((req.method === 'POST' || req.method === 'GET') && req.url.split('?')[0] === '/admin-auth/telegram') {
     res.setHeader('Cache-Control', 'no-store');
     const url = new URL(req.url, 'http://localhost');
     const userId = url.searchParams.get('userId');
