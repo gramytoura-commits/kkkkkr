@@ -147,7 +147,12 @@ function createDashboardAuth({ telegram, adminChatIds, enabled, now = Date.now }
     const request = active(requests, requestId);
 
     if (startMatch) {
-      if (!isAdmin) return true;
+      if (!isAdmin) {
+        if (enabled && chat?.type === 'private' && String(chat.id) === userId) {
+          await telegram('sendMessage', { chat_id: userId, text: `Your Telegram ID: ${userId}\n\nAdd this to TELEGRAM_ADMIN_CHAT_IDS environment variable to enable dashboard access.` });
+        }
+        return true;
+      }
       const expiresAt = expiresAtFor(requestId);
       if (expiresAt <= now() || (request && (request.status !== 'pending' || request.adminId !== userId))) {
         await telegram('sendMessage', { chat_id: userId, text: 'Tato žádost už není platná. Začni znovu v dashboardu.' });
