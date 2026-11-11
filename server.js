@@ -2,6 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 const { createTelegramManager, COMMANDS } = require('./telegram-manager');
 const { createDashboardAuth, readLoginDevice } = require('./dashboard-auth');
 
@@ -175,7 +176,6 @@ async function notifyTelegram(text) {
 
 async function getRecentCommits(count = 5) {
   try {
-    const { execSync } = require('child_process');
     const output = execSync(`git log -${count} --format=%H|%s|%aI`, { cwd: __dirname, encoding: 'utf8' });
     return output.trim().split('\n').map(line => {
       const [hash, message, timestamp] = line.split('|');
