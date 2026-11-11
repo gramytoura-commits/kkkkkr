@@ -8,6 +8,6 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test *.test.js",
-    "check": "node --check server.js && node --check telegram-manager.js && node --check admin/app.js"
+    "check": "node --check server.js && node --check telegram-manager.js && node --check dashboard-auth.js && node --check admin/app.js"
   }
 }

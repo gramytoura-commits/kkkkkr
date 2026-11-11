@@ -295,6 +295,31 @@ test('web admin API requires a key, validates before mutation, and saves edits a
   } finally { await new Promise((resolve) => ledger.server.close(resolve)); }
 });
 
+test('web admin API stores, edits and clears transfer bank details', async () => {
+  await new Promise((resolve) => ledger.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${ledger.server.address().port}`;
+  const call = (route, method, value) => fetch(base + route, { method, headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json' }, body: JSON.stringify(value) });
+  try {
+    const before = transactions().length;
+    assert.equal((await call('/admin-api/transactions', 'POST', { amount: 5, recipient: 'Bad BIC', bic: 'NOT-A-BIC!' })).status, 400);
+    assert.equal(transactions().length, before);
+    const response = await call('/admin-api/transactions', 'POST', { amount: 20, recipient: 'Jozef Koltoo', direction: 'minus', status: 'confirmed', iban: ' cy84 9020 0001 ', bankName: 'CARDPAY EUROPE LTD', bic: 'cardcy2lxxx' });
+    assert.equal(response.status, 201);
+    const { transaction } = await response.json();
+    assert.equal(transaction.iban, 'CY84 9020 0001');
+    assert.equal(transaction.bankName, 'CARDPAY EUROPE LTD');
+    assert.equal(transaction.bic, 'CARDCY2LXXX');
+    const route = `/admin-api/transactions/${transaction.id}`;
+    assert.equal((await call(route, 'PATCH', { amount: 25 })).status, 200);
+    assert.equal(transactions().find((item) => item.id === transaction.id).bic, 'CARDCY2LXXX');
+    assert.equal((await call(route, 'PATCH', { iban: '', bankName: '', bic: '' })).status, 200);
+    const cleared = transactions().find((item) => item.id === transaction.id);
+    assert.equal('iban' in cleared || 'bankName' in cleared || 'bic' in cleared, false);
+    const plain = await call('/admin-api/transactions', 'POST', { amount: 1, recipient: 'No bank details' });
+    assert.equal('iban' in (await plain.json()).transaction, false);
+  } finally { await new Promise((resolve) => ledger.server.close(resolve)); }
+});
+
 test('connected app profiles hold only a test label, are marked demo and expose their own balance and selection', async () => {
   const appId = 'app_profile_test_123456';
   const appCall = (body, key = 'test-secret') => fetch(`http://127.0.0.1:${ledger.server.address().port}/admin-api/apps/${appId}`, { method: 'PUT', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });

@@ -14,8 +14,14 @@ Copy `.env.example` to `.env`, configure a strong `API_SECRET`, then run:
 npm start
 ```
 
-Open `/admin/` and connect using the API secret. `/health` is public; ledger,
-account, connected-app and support endpoints require `Authorization: Bearer`.
+Open `/admin/`, choose **Sign in with Telegram**, and open the private bot chat.
+Compare the code on both screens and press **Potvrdit** in Telegram. Return to
+the original tab to use the dashboard. Telegram sign-in requires the backend's
+bot polling and an allowed private Telegram user. Requests expire after five
+minutes. The session lasts up to eight hours in the tab and ends on sign-out
+or a backend restart. The backend key is also available as a sign-in option.
+
+`/health` is public. API clients authenticate with `Authorization: Bearer`.
 New customer app instances must be configured in the dashboard before showing
 account data. The API supports cross-origin requests from the separate frontend.
 

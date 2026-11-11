@@ -2,5 +2,6 @@
 !package.json
 !server.js
 !telegram-manager.js
+!dashboard-auth.js
 !admin/
 !admin/**

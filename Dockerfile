@@ -1,7 +1,7 @@
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=8787 DATA_DIR=/app/data APK_PATH=/app/artifacts/app.apk
-COPY package.json server.js telegram-manager.js ./
+COPY package.json server.js telegram-manager.js dashboard-auth.js ./
 COPY admin ./admin
 RUN mkdir -p /app/data /app/artifacts
 EXPOSE 8787

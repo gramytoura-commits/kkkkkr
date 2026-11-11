@@ -13,3 +13,8 @@ label{display:block;color:#b6c3bf;font-size:12px;font-weight:600}input,select,te
 @media(max-width:1000px){.sidebar{width:210px}.sidebar+main{margin-left:210px;width:calc(100% - 210px);padding:30px 24px}.stats{grid-template-columns:1fr 1fr}.balance{grid-column:span 2}}
 @media(max-width:700px){body{display:block}.sidebar{position:relative;width:100%;height:auto;padding:15px 16px;display:block}.workspace{display:none}.sidebar nav{display:flex;margin-top:14px}.sidebar-bottom{margin-top:14px}.sidebar-bottom #disconnect{margin-left:auto}main,.sidebar+main{width:100%;margin:0;padding:24px 15px 45px}header{display:block}header .header-actions{justify-content:flex-start;margin-top:22px}.stats{grid-template-columns:1fr 1fr}.balance{grid-column:span 2}.login form,.form-grid{grid-template-columns:1fr}.login form label:first-child,.login form button{grid-column:auto}.toolbar{display:block}.tools{margin-top:14px}.tools input{width:100%;min-width:0}.app-row{align-items:flex-start;flex-direction:column}.app-row-actions{justify-content:flex-start}.audit-entry{display:block}.audit-entry time{display:block;margin-bottom:5px}.card{padding:18px}h1{font-size:30px}}
 .sidebar{display:none}main,.sidebar+main{width:100%;margin-left:0;max-width:none;padding:38px 6vw 70px}
+.telegram-open{display:inline-block;padding:10px 14px;border-radius:10px;text-decoration:none}
+.telegram-open[hidden]{display:none}
+#telegramStatus{margin:12px 0 0}
+.key-login summary{cursor:pointer}
+.key-login form{margin-top:14px}
