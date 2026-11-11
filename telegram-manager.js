@@ -387,13 +387,17 @@ function createTelegramManager(deps) {
       } else if (['/confirm', '/reject'].includes(command)) {
         await handleCallback(chatId, key, actor, `tm:status:${args[0]}:${command === '/confirm' ? 'confirmed' : 'rejected'}`);
       } else if (command === '/deploy') {
-        const name = args[0] || 'Backend';
+        const name = args.join(' ') || 'Backend';
         const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
         const msg = `🚀 *${name}* deployed\n\n⏰ ${time}`;
-        for (const id of adminChatIds) {
-          await telegram('sendMessage', { chat_id: id, text: msg, parse_mode: 'Markdown' }).catch(() => {});
+        try {
+          for (const id of adminChatIds) {
+            await telegram('sendMessage', { chat_id: id, text: msg, parse_mode: 'Markdown' }).catch(() => {});
+          }
+          await send(chatId, '✅ Deployment notification sent to all admins', [menuButton()]);
+        } catch (e) {
+          await send(chatId, '❌ Failed to send deployment notification', [menuButton()]);
         }
-        await send(chatId, '✅ Deployment notification sent to all admins', [menuButton()]);
         recordEvent('deployment.notified', { actor, deploymentName: name });
       } else if (!text.startsWith('/')) {
         const active = sessions.get(key);
