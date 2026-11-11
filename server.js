@@ -53,6 +53,8 @@ store.events ||= [];
 store.support ||= {};
 store.apps ||= {};
 store.groups ||= {};
+store.integrations ||= {};
+store.klarnaEvents ||= {};
 store.adminChatIds ||= [];
 store.lastDeploymentCommit = store.lastDeploymentCommit || '';
 store.adminChatIds.forEach((chatId) => ADMIN_CHAT_IDS.add(String(chatId)));
@@ -123,6 +125,42 @@ function groupView(group) {
 function appView(app) {
   const g = groupOf(app);
   return { ...app, transactionIds: appTransactionIds(app), balance: g ? groupBalance(g) : 0, currency: g ? g.currency : 'EUR', groupName: g ? g.name : '' };
+}
+// Integrations: a revocable token that lets an external sender (e.g. Klarna Companion)
+// push booked transfers. Each integration targets one or more groups; an imported
+// transfer becomes a confirmed transaction added to those groups.
+function newIntegrationToken() { return `klarna_live_${crypto.randomBytes(24).toString('hex')}`; }
+function integrationByToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  return Object.values(store.integrations).find((i) => !i.revoked && i.token === token) || null;
+}
+function validGroupIds(ids) {
+  return [...new Set((Array.isArray(ids) ? ids : []).filter((g) => store.groups[g]))];
+}
+function integrationView(i) {
+  return {
+    id: i.id, name: i.name, token: i.token, revoked: !!i.revoked,
+    groupIds: i.groupIds || [], groupNames: (i.groupIds || []).map((g) => store.groups[g]?.name).filter(Boolean),
+    createdAt: i.createdAt, lastUsedAt: i.lastUsedAt || null, importCount: i.importCount || 0
+  };
+}
+function transferFingerprint(input) {
+  const canonical = JSON.stringify({
+    amount: String(input.amount ?? ''), currency: String(input.currency ?? '').toUpperCase(),
+    booking_date: String(input.booking_date ?? ''), sender_name: String(input.sender_name ?? ''),
+    payment_reference: String(input.payment_reference ?? ''), sender_iban_masked: String(input.sender_iban_masked ?? '')
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+// Imported transfers belonging to an integration, newest first (for the dashboard).
+function integrationTransfers(integrationId) {
+  return Object.entries(store.klarnaEvents)
+    .filter(([, e]) => e.integrationId === integrationId)
+    .map(([key, e]) => {
+      const tx = store.transactions.find((t) => t.id === e.transactionId);
+      return { eventKey: key, eventId: key.slice(integrationId.length + 1), transactionId: e.transactionId, createdAt: e.createdAt, transaction: tx ? publicTransaction(tx) : null };
+    })
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
 }
 function recordEvent(type, payload = {}) {
   store.events.unshift({ id: id('evt'), type, createdAt: now(), ...payload });
@@ -583,6 +621,59 @@ const server = http.createServer(async (req, res) => {
     dashboardAuth.logout(req.headers.authorization);
     return sendJson(res, 200, { ok: true });
   }
+  if (req.method === 'POST' && req.url === '/api/integrations/klarna/transfers') {
+    res.setHeader('Cache-Control', 'no-store');
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    const integration = integrationByToken(token);
+    if (!integration) return sendJson(res, 401, { error: 'invalid or revoked integration token' });
+    let input;
+    try { input = await body(req); } catch { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+    if (Number(input.schema_version) !== 1) return sendJson(res, 400, { error: 'unsupported schema_version' });
+    const eventId = String(input.event_id || '').trim();
+    if (!eventId) return sendJson(res, 400, { error: 'event_id is required' });
+    const idemHeader = String(req.headers['idempotency-key'] || '').trim();
+    if (idemHeader && idemHeader !== eventId) return sendJson(res, 400, { error: 'Idempotency-Key must equal event_id' });
+    // Only booked transfers create a transaction; earlier notifications are acknowledged and ignored.
+    if (input.event_type !== 'klarna.incoming_transfer.booked') return sendJson(res, 202, { ignored: true, reason: 'not a booked transfer event' });
+    const key = `${integration.id}:${eventId}`;
+    const fingerprint = transferFingerprint(input);
+    const existing = store.klarnaEvents[key];
+    if (existing) {
+      if (existing.payloadHash === fingerprint) {
+        const tx = store.transactions.find((t) => t.id === existing.transactionId);
+        return sendJson(res, 200, { duplicate: true, transaction: tx ? publicTransaction(tx) : null });
+      }
+      return sendJson(res, 409, { error: 'event_id already used with different data' });
+    }
+    let tx;
+    try {
+      tx = createTransaction({
+        amount: input.amount, currency: input.currency, direction: 'plus',
+        recipient: String(input.sender_name || '').trim() || 'Klarna transfer',
+        note: String(input.payment_reference || '').trim(), icon: '↙'
+      }, 'klarna', { notify: false });
+    } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    // The masked IBAN keeps its masking characters, so it is stored separately from
+    // the validated full-IBAN bank field.
+    const maskedIban = String(input.sender_iban_masked || '').trim().slice(0, 42);
+    if (maskedIban) tx.senderIbanMasked = maskedIban;
+    // A booked transfer is already settled: mark confirmed and use the booking date.
+    tx.status = 'confirmed'; tx.confirmedAt = now();
+    const bookingDate = String(input.booking_date || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(bookingDate)) tx.createdAt = new Date(`${bookingDate}T12:00:00.000Z`).toISOString();
+    tx.integrationId = integration.id; tx.eventId = eventId;
+    for (const gid of integration.groupIds || []) {
+      const g = store.groups[gid];
+      if (g && !g.transactionIds.includes(tx.id)) { g.transactionIds.push(tx.id); g.updatedAt = now(); }
+    }
+    store.klarnaEvents[key] = { integrationId: integration.id, eventId, payloadHash: fingerprint, transactionId: tx.id, createdAt: now() };
+    integration.importCount = (integration.importCount || 0) + 1;
+    integration.lastUsedAt = now();
+    saveStore();
+    recordEvent('klarna.transfer.imported', { integrationId: integration.id, eventId, transactionId: tx.id, amount: tx.amount });
+    return sendJson(res, 201, { transaction: publicTransaction(tx) });
+  }
   if (!authorized(req)) return sendJson(res, 401, { error: 'unauthorized' });
   res.setHeader('Cache-Control', 'no-store');
   try {
@@ -611,6 +702,49 @@ const server = http.createServer(async (req, res) => {
       const attached=appsInGroup(groupId);
       if(attached.length)throw new Error(`Cannot delete: ${attached.length} app(s) still use this group.`);
       delete store.groups[groupId];recordEvent('group.deleted',{groupId,actor:'web-admin'});
+      return sendJson(res,200,{ok:true});
+    }
+    if(req.method==='GET' && req.url==='/admin-api/integrations')return sendJson(res,200,{integrations:Object.values(store.integrations).map(integrationView)});
+    if(req.method==='POST' && req.url==='/admin-api/integrations') {
+      const input=await body(req);
+      if(String(input.name||'').trim().length<2)throw new Error('Enter an integration name (2+ characters).');
+      const integrationId=`int_${crypto.randomBytes(8).toString('hex')}`;
+      const integration={id:integrationId,name:String(input.name).trim().slice(0,80),token:newIntegrationToken(),groupIds:validGroupIds(input.groupIds),revoked:false,createdAt:now(),lastUsedAt:null,importCount:0};
+      store.integrations[integrationId]=integration;recordEvent('integration.created',{integrationId,actor:'web-admin'});saveStore();
+      return sendJson(res,201,{integration:integrationView(integration)});
+    }
+    if(req.method==='GET' && req.url.match(/^\/admin-api\/integrations\/[^/]+\/transfers$/)) {
+      const integrationId=req.url.split('/')[3];
+      if(!store.integrations[integrationId])throw new Error('Integration not found');
+      return sendJson(res,200,{transfers:integrationTransfers(integrationId)});
+    }
+    if(req.method==='DELETE' && req.url.match(/^\/admin-api\/integrations\/[^/]+\/transfers\/[^/]+$/)) {
+      const parts=req.url.split('/');const integrationId=parts[3];const txId=decodeURIComponent(parts[5]);
+      const key=`${integrationId}:${Object.entries(store.klarnaEvents).find(([k,e])=>e.integrationId===integrationId&&e.transactionId===txId)?.[1]?.eventId||''}`;
+      if(!store.klarnaEvents[key])throw new Error('Transfer not found');
+      delete store.klarnaEvents[key];
+      for(const g of Object.values(store.groups)){const i=g.transactionIds.indexOf(txId);if(i>=0){g.transactionIds.splice(i,1);g.updatedAt=now();}}
+      try{removeTransaction(txId,'web-admin');}catch{}
+      saveStore();recordEvent('klarna.transfer.removed',{integrationId,transactionId:txId,actor:'web-admin'});
+      return sendJson(res,200,{ok:true});
+    }
+    if(req.method==='POST' && req.url.match(/^\/admin-api\/integrations\/[^/]+\/rotate$/)) {
+      const integration=store.integrations[req.url.split('/')[3]];if(!integration)throw new Error('Integration not found');
+      integration.token=newIntegrationToken();integration.revoked=false;saveStore();recordEvent('integration.rotated',{integrationId:integration.id,actor:'web-admin'});
+      return sendJson(res,200,{integration:integrationView(integration)});
+    }
+    if(req.method==='PUT' && req.url.startsWith('/admin-api/integrations/')) {
+      const integration=store.integrations[req.url.split('/')[3]];if(!integration)throw new Error('Integration not found');
+      const input=await body(req);
+      if(input.name!==undefined){if(String(input.name).trim().length<2)throw new Error('Enter an integration name (2+ characters).');integration.name=String(input.name).trim().slice(0,80);}
+      if(input.groupIds!==undefined)integration.groupIds=validGroupIds(input.groupIds);
+      if(input.revoked!==undefined)integration.revoked=!!input.revoked;
+      saveStore();recordEvent('integration.updated',{integrationId:integration.id,actor:'web-admin'});
+      return sendJson(res,200,{integration:integrationView(integration)});
+    }
+    if(req.method==='DELETE' && req.url.startsWith('/admin-api/integrations/')) {
+      const integrationId=req.url.split('/')[3];if(!store.integrations[integrationId])throw new Error('Integration not found');
+      delete store.integrations[integrationId];recordEvent('integration.deleted',{integrationId,actor:'web-admin'});saveStore();
       return sendJson(res,200,{ok:true});
     }
     if(req.method==='POST' && req.url==='/admin-api/apps') {

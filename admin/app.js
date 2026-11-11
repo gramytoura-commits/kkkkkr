@@ -1,6 +1,6 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
-const state = { key: '', base: '', transactions: [], events: [], apps: [], groups: [], activeAppId: '', globalOrder: JSON.parse(localStorage.getItem('demo-ledger-order') || '[]'), balance: 0, filter: 'all', query: '', page: 0, view: 'transactions', editingId: null, deletingId: null, connected: false, busy: false, dark: localStorage.getItem('demo-ledger-theme') !== 'light' };
+const state = { key: '', base: '', transactions: [], events: [], apps: [], groups: [], integrations: [], activeAppId: '', globalOrder: JSON.parse(localStorage.getItem('demo-ledger-order') || '[]'), balance: 0, filter: 'all', query: '', page: 0, view: 'transactions', editingId: null, deletingId: null, connected: false, busy: false, dark: localStorage.getItem('demo-ledger-theme') !== 'light' };
 const PAGE_SIZE = 12;
 let telegramAttempt;
 const authorization = () => `${state.telegram ? 'Dashboard' : 'Bearer'} ${state.key}`;
@@ -34,6 +34,7 @@ async function request(path, options = {}) {
 function render() {
   renderApps();
   renderGroups();
+  if (state.view === 'integrations') renderIntegrations();
   const activeApp = state.apps.find((app) => app.id === state.activeAppId) || null;
   renderProfilePanel(activeApp);
   const knownIds = new Set(state.transactions.map((tx) => tx.id));
@@ -62,10 +63,11 @@ function render() {
 async function refresh(connecting = false) {
   if ((!state.connected && !connecting) || state.busy) return;
   const activeAuthorization = authorization();
-  const [account, ledger, audit, apps, groups] = await Promise.all([request('/account'), request('/transactions'), request('/logs'), request('/admin-api/apps'), request('/admin-api/groups')]);
+  const [account, ledger, audit, apps, groups, integrations] = await Promise.all([request('/account'), request('/transactions'), request('/logs'), request('/admin-api/apps'), request('/admin-api/groups'), request('/admin-api/integrations')]);
   if (authorization() !== activeAuthorization || (!state.connected && !connecting)) return;
   state.apps=apps.apps||[];
   state.groups=groups.groups||[];
+  state.integrations=integrations.integrations||[];
   if (state.activeAppId && !state.apps.some((app) => app.id === state.activeAppId)) state.activeAppId = '';
   renderAppSelector();
   state.transactions = ledger.transactions || [];
@@ -255,8 +257,16 @@ $('#next').addEventListener('click', () => { state.page++; render(); });
 for (const id of ['#refresh', '#refreshAudit']) $(id).addEventListener('click', () => refresh().catch((error) => notice(error.message, true)));
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
   state.view = button.dataset.view;
-  $('#pageTitle').textContent = state.view === 'audit' ? 'Audit log' : 'Transactions';
-  $('#transactionsPanel').hidden = state.view !== 'transactions'; $('#auditPanel').hidden = state.view !== 'audit';
+  const titles = { transactions: 'Transactions', integrations: 'Integrations', audit: 'Audit log' };
+  $('#pageTitle').textContent = titles[state.view] || 'Transactions';
+  const isTx = state.view === 'transactions';
+  $('#transactionsPanel').hidden = !isTx;
+  const stats = document.querySelector('.stats'); if (stats) stats.hidden = !isTx;
+  if (typeof groupsSection !== 'undefined') groupsSection.hidden = !isTx;
+  if (typeof appsSection !== 'undefined') appsSection.hidden = !isTx;
+  $('#auditPanel').hidden = state.view !== 'audit';
+  const intPanel = document.querySelector('#integrationsPanel'); if (intPanel) intPanel.hidden = state.view !== 'integrations';
+  if (state.view === 'integrations') renderIntegrations();
   document.querySelectorAll('[data-view]').forEach((item) => item.classList.toggle('active', item === button));
 }));
 setInterval(() => { if (state.connected && !document.hidden && !document.querySelector('dialog[open]')) refresh().catch(() => { $('#connectionState').textContent = 'Connection interrupted'; }); }, 15000);
@@ -339,3 +349,48 @@ document.querySelector('#cancelGroup').onclick=()=>{if(!state.busy)groupDialog.c
 document.querySelector('#groupForm').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const payload={name:data.get('name'),currency:data.get('currency')||'EUR',balanceOverride:data.get('balanceOverride')===''?null:data.get('balanceOverride'),transactionIds:data.getAll('transactionIds')};await mutation(event.target,'#groupError',()=>request(editingGroup?'/admin-api/groups/'+encodeURIComponent(editingGroup):'/admin-api/groups',{method:editingGroup?'PUT':'POST',body:JSON.stringify(payload)}),editingGroup?'Account saved':'Account created');};
 document.querySelector('#appForm').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const payload={label:data.get('label'),groupId:data.get('groupId'),fullName:data.get('fullName'),email:data.get('email'),phone:data.get('phone'),iban:data.get('iban'),beneficiaryName:data.get('beneficiaryName'),address:data.get('address'),dateOfBirth:data.get('dateOfBirth'),taxId:data.get('taxId'),bankName:data.get('bankName'),bic:data.get('bic'),accountHolder:data.get('accountHolder'),status:data.get('status')};const result=await mutation(event.target,'#appError',()=>request(editingApp?'/admin-api/apps/'+encodeURIComponent(editingApp):'/admin-api/apps',{method:editingApp?'PUT':'POST',body:JSON.stringify(payload)}),editingApp?'App saved':'App created');if(!editingApp&&result?.app){downloadProfileApk(result.app);}}
 $('#newProfile').disabled=true;document.querySelector('#sectionNewProfile').disabled=true;
+
+// ===== Klarna Companion integrations =====
+const integrationsPanel=document.createElement('section');integrationsPanel.className='card';integrationsPanel.id='integrationsPanel';integrationsPanel.hidden=true;integrationsPanel.style.cssText='padding:24px';
+integrationsPanel.innerHTML='<div class="toolbar"><div><h2 style="margin-top:0">Klarna Companion integrations</h2><p class="hint">A revocable token lets Klarna Companion push booked transfers into the selected accounts. The receiving app needs no Klarna login, bank key, Telegram token or full IBAN.</p></div><button id="newIntegrationButton" class="primary" type="button">＋ New integration</button></div><div class="hint" style="margin:0 0 16px;padding:12px 14px;background:rgba(127,127,127,.08);border-radius:10px;font-family:ui-monospace,monospace;font-size:12px;line-height:1.7;overflow-wrap:anywhere">POST <span id="integrationEndpoint"></span><br>Authorization: Bearer &lt;integration token&gt;<br>Idempotency-Key: &lt;event_id&gt;</div><div id="integrationRows"></div>';
+document.querySelector('.stats').before(integrationsPanel);
+const integrationDialog=document.createElement('dialog');integrationDialog.id='integrationDialog';integrationDialog.innerHTML='<form id="integrationForm"><h2 id="integrationDialogTitle">New integration</h2><label>Name<input name="name" required minlength="2" maxlength="80" placeholder="e.g. Klarna Companion"></label><h3>Share with accounts</h3><p class="hint">Booked transfers from this integration appear in the selected accounts (groups).</p><div id="integrationGroups" style="max-height:220px;overflow:auto"></div><p class="form-error" id="integrationError"></p><div class="dialog-footer"><button type="button" id="cancelIntegration">Cancel</button><button class="primary" id="saveIntegrationButton">Save integration</button></div></form>';document.body.appendChild(integrationDialog);
+let editingIntegration='';
+const expandedTransfers=new Set();
+function integrationGroupList(selected){document.querySelector('#integrationGroups').innerHTML=(state.groups||[]).map(g=>'<label style="display:flex;align-items:center;gap:12px"><input style="flex:none" type="checkbox" name="groupIds" value="'+escape(g.id)+'" '+((selected||[]).includes(g.id)?'checked':'')+'><span>'+escape(g.name||'Account')+' · '+g.appCount+' app'+(g.appCount===1?'':'s')+'</span></label>').join('')||'<p class="hint">No accounts yet. Create one in Transactions first.</p>';}
+function openNewIntegration(){editingIntegration='';const f=document.querySelector('#integrationForm');f.reset();document.querySelector('#integrationDialogTitle').textContent='New integration';integrationGroupList([]);document.querySelector('#integrationError').textContent='';integrationDialog.showModal();}
+function openIntegrationEditor(it){editingIntegration=it.id;const f=document.querySelector('#integrationForm');f.elements.name.value=it.name||'';document.querySelector('#integrationDialogTitle').textContent='Edit integration';integrationGroupList(it.groupIds||[]);document.querySelector('#integrationError').textContent='';integrationDialog.showModal();}
+function tokenMask(t){return t?(t.slice(0,14)+'…'+t.slice(-4)):'';}
+function renderIntegrations(){
+  const ep=document.querySelector('#integrationEndpoint'); if(ep) ep.textContent=(state.base||location.origin)+'/api/integrations/klarna/transfers';
+  const list=document.querySelector('#integrationRows'); if(!list)return;
+  list.innerHTML=(state.integrations||[]).map(it=>{
+    const groups=it.groupNames&&it.groupNames.length?it.groupNames.join(', '):'No accounts linked';
+    const revoked=it.revoked?' · <span style="color:#b4290f">revoked</span>':'';
+    return '<div class="app-row" style="flex-wrap:wrap"><div style="min-width:220px"><strong>'+escape(it.name)+'</strong><small>'+escape(groups)+' · '+it.importCount+' import'+(it.importCount===1?'':'s')+revoked+'</small><div style="margin-top:6px;font-family:ui-monospace,monospace;font-size:12px;color:#6b7280">'+escape(tokenMask(it.token))+'</div></div><div class="app-row-actions"><button data-copy-token="'+escape(it.token)+'">Copy token</button><button data-view-transfers="'+escape(it.id)+'">Transfers</button><button data-edit-int="'+escape(it.id)+'">Edit</button><button data-rotate-int="'+escape(it.id)+'">Rotate</button><button class="remove" data-delete-int="'+escape(it.id)+'">Delete</button></div><div class="integration-transfers" id="transfers-'+escape(it.id)+'" style="flex-basis:100%"></div></div>';
+  }).join('')||'<p class="hint">No integrations yet. Create one and share its token with the Klarna Companion developer.</p>';
+  expandedTransfers.forEach(id=>loadTransfers(id));
+}
+async function loadTransfers(integrationId){
+  const container=document.querySelector('#transfers-'+integrationId); if(!container)return;
+  try{
+    const res=await request('/admin-api/integrations/'+encodeURIComponent(integrationId)+'/transfers');
+    const transfers=res.transfers||[];
+    container.innerHTML='<div style="border-top:1px solid rgba(127,127,127,.2);margin-top:10px;padding-top:10px">'+(transfers.length?transfers.map(t=>{const tx=t.transaction||{};return '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:6px 0"><div><strong>+'+money(tx.amount||0)+' '+escape(tx.currency||'')+'</strong> <small>'+escape(tx.recipient||'')+(tx.note?' · '+escape(tx.note):'')+' · '+escape((tx.createdAt||"").slice(0,10))+'</small></div><button class="remove" data-remove-transfer="'+escape(integrationId)+'|'+escape(t.transactionId)+'">Remove</button></div>';}).join(''):'<p class="hint">No transfers imported yet.</p>')+'</div>';
+  }catch(e){container.innerHTML='<p class="hint">Could not load transfers.</p>';}
+}
+async function deleteIntegration(it){if(!confirm('Delete integration "'+it.name+'"? Its token stops working immediately.'))return;try{await request('/admin-api/integrations/'+encodeURIComponent(it.id),{method:'DELETE'});notice('Integration deleted');await refresh();renderIntegrations();}catch(e){notice(e.message,true);}}
+async function rotateIntegration(it){if(!confirm('Rotate the token for "'+it.name+'"? The old token stops working.'))return;try{await request('/admin-api/integrations/'+encodeURIComponent(it.id)+'/rotate',{method:'POST'});notice('New token generated');await refresh();renderIntegrations();}catch(e){notice(e.message,true);}}
+async function removeTransfer(integrationId,txId){if(!confirm('Remove this imported transfer? It will be deleted from the account.'))return;try{await request('/admin-api/integrations/'+encodeURIComponent(integrationId)+'/transfers/'+encodeURIComponent(txId),{method:'DELETE'});notice('Transfer removed');await refresh();await loadTransfers(integrationId);}catch(e){notice(e.message,true);}}
+document.querySelector('#newIntegrationButton').addEventListener('click',openNewIntegration);
+document.querySelector('#cancelIntegration').onclick=()=>{if(!state.busy)integrationDialog.close();};
+integrationsPanel.addEventListener('click',event=>{
+  const t=event.target;
+  const copy=t.closest('[data-copy-token]'); if(copy){(navigator.clipboard?navigator.clipboard.writeText(copy.dataset.copyToken):Promise.reject()).then(()=>notice('Token copied')).catch(()=>notice('Copy failed — reveal and copy manually',true));return;}
+  const view=t.closest('[data-view-transfers]'); if(view){const id=view.dataset.viewTransfers;if(expandedTransfers.has(id)){expandedTransfers.delete(id);const c=document.querySelector('#transfers-'+id);if(c)c.innerHTML='';}else{expandedTransfers.add(id);loadTransfers(id);}return;}
+  const edit=t.closest('[data-edit-int]'); if(edit){const it=state.integrations.find(x=>x.id===edit.dataset.editInt);if(it)openIntegrationEditor(it);return;}
+  const rot=t.closest('[data-rotate-int]'); if(rot){const it=state.integrations.find(x=>x.id===rot.dataset.rotateInt);if(it)rotateIntegration(it);return;}
+  const del=t.closest('[data-delete-int]'); if(del){const it=state.integrations.find(x=>x.id===del.dataset.deleteInt);if(it)deleteIntegration(it);return;}
+  const rem=t.closest('[data-remove-transfer]'); if(rem){const parts=rem.dataset.removeTransfer.split('|');removeTransfer(parts[0],parts[1]);return;}
+});
+document.querySelector('#integrationForm').onsubmit=async event=>{event.preventDefault();const data=new FormData(event.target);const payload={name:data.get('name'),groupIds:data.getAll('groupIds')};await mutation(event.target,'#integrationError',()=>request(editingIntegration?'/admin-api/integrations/'+encodeURIComponent(editingIntegration):'/admin-api/integrations',{method:editingIntegration?'PUT':'POST',body:JSON.stringify(payload)}),editingIntegration?'Integration saved':'Integration created');renderIntegrations();};
