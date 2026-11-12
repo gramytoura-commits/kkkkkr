@@ -7,7 +7,8 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node server.js",
+    "dev": "node scripts/dev.js",
     "test": "node --test *.test.js",
-    "check": "node --check server.js && node --check telegram-manager.js && node --check dashboard-auth.js && node --check admin/app.js"
+    "check": "node scripts/check.js"
   }
 }

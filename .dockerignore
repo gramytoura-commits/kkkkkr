@@ -3,5 +3,7 @@
 !server.js
 !telegram-manager.js
 !dashboard-auth.js
+!src/
+!src/**
 !admin/
 !admin/**

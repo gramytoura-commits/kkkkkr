@@ -4,26 +4,66 @@ Independent Node.js backend for the demo customer app. It includes the HTTP API,
 Telegram transaction manager and administration dashboard. It does not connect to
 a bank or process real payments. The customer frontend is deployed separately.
 
-## Run
+## Run locally
 
-Requires Node.js 20 or later and no third-party runtime dependencies.
+Requires Node.js 20 or later and **no third-party runtime dependencies** — there
+is nothing to `npm install`. From this folder:
 
-Copy `.env.example` to `.env`, configure a strong `API_SECRET`, then run:
+```sh
+npm run dev
+```
+
+That is all. `npm run dev` starts the server on <http://127.0.0.1:8787> with
+local-friendly defaults: Telegram polling is off (no bot token needed) and the
+dashboard at `/admin/` opens straight away without sign-in. A demo ledger is
+seeded on first run and stored in `./data/` (git-ignored).
+
+For a production-style run (Telegram enabled, authentication enforced), copy
+`.env.example` to `.env`, set a strong `API_SECRET` and the Telegram variables,
+then:
 
 ```sh
 npm start
 ```
 
-Open `/admin/`, choose **Sign in with Telegram**, and open the private bot chat.
-Compare the code on both screens and press **Potvrdit** in Telegram. Return to
-the original tab to use the dashboard. Telegram sign-in requires the backend's
-bot polling and an allowed private Telegram user. Requests expire after five
-minutes. The session lasts up to eight hours in the tab and ends on sign-out
-or a backend restart. The backend key is also available as a sign-in option.
+With Telegram enabled, open `/admin/`, choose **Sign in with Telegram**, and open
+the private bot chat. Compare the code on both screens and press **Potvrdit** in
+Telegram. Return to the original tab to use the dashboard. Telegram sign-in
+requires the backend's bot polling and an allowed private Telegram user. Requests
+expire after five minutes. The session lasts up to eight hours in the tab and ends
+on sign-out or a backend restart. The backend key is also available as a sign-in
+option.
 
 `/health` is public. API clients authenticate with `Authorization: Bearer`.
 New customer app instances must be configured in the dashboard before showing
 account data. The API supports cross-origin requests from the separate frontend.
+
+## Project structure
+
+`server.js` is a thin entry point; the implementation lives in `src/`, split by
+responsibility so each piece can be read, tested or reused on its own:
+
+```
+server.js              Entry point: wires modules, runs migrations, starts listening
+src/
+  config.js            Env loading + all configuration constants
+  store.js             The JSON ledger: load/save, migrations, audit log
+  util.js              HTTP/text helpers (escapeHtml, sendJson, readBody)
+  domain/
+    transactions.js    Create/edit/confirm/delete transactions, balances
+    groups.js          Linked groups: shared selection, balance, currency
+    integrations.js    Revocable tokens for pushed (Klarna) transfers
+    apps.js            Connected customer apps and their test profiles
+  telegram/
+    api.js             Telegram Bot API transport + notification helpers
+    bot.js             Update routing, long-polling, deployment notices
+  http/
+    server.js          The HTTP server and all route handlers
+admin/                 Static admin dashboard (served at /admin/)
+scripts/               dev.js (npm run dev), check.js (npm run check)
+telegram-manager.js    Telegram transaction-manager module (+ its tests)
+dashboard-auth.js      Telegram dashboard sign-in module (+ its tests)
+```
 
 ## Test data only
 
