@@ -758,6 +758,11 @@ const server = http.createServer(async (req, res) => {
       store.apps[appId]=app;recordEvent('app.created',{appId,actor:'web-admin',groupId:group.id,copiedFrom:sourceId||undefined});
       return sendJson(res,201,{app:appView(app),apkUrl:`/admin-api/apps/${encodeURIComponent(appId)}/apk`});
     }
+    if(req.method==='GET' && req.url==='/admin-api/apk') {
+      if(!fs.existsSync(APK_PATH))throw new Error('APK file was not found on the server.');
+      res.writeHead(200,{'content-type':'application/vnd.android.package-archive','content-disposition':'attachment; filename="FakeKlarna.apk"','cache-control':'no-store'});
+      return res.end(fs.readFileSync(APK_PATH));
+    }
     if(req.method==='GET' && req.url.startsWith('/admin-api/apps/') && req.url.endsWith('/apk')) {
       const appId=req.url.split('/')[3];
       if(!store.apps[appId])throw new Error('App not found');
